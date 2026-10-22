@@ -52,10 +52,23 @@ static int eventtail;
  * Called by the I/O functions when input is detected
  */
 
+// void d_post_event(event_t *ev)
+// {
+//   events[eventhead] = *ev;
+//   eventhead = (eventhead + 1) % MAXEVENTS;
+// }
 void d_post_event(event_t *ev)
 {
+  int next = (eventhead + 1) % MAXEVENTS;
+
+  if (next == eventtail)
+    {
+      printf("DOOM EVENT QUEUE FULL!\n");
+      return;
+    }
+
   events[eventhead] = *ev;
-  eventhead = (eventhead + 1) % MAXEVENTS;
+  eventhead = next;
 }
 
 /* Read an event from the queue. */

@@ -143,7 +143,13 @@ choice # Input method
 	config GAMES_NXDOOM_KEYBOARD
 		bool "Keyboard"
 		---help---
-			Use a NuttX keyboard character driver.
+            Use the NuttX keyboard event interface.
+            Supports USB HID keyboards and Xbox keyboard emulation.
+
+	config GAMES_NXDOOM_XBOX
+    	bool "Xbox USB controller (legacy)"
+    	---help---
+        	Use the Xbox controller through /dev/xboxa.
 
 endchoice # Input method
 
@@ -151,11 +157,21 @@ if GAMES_NXDOOM_KEYBOARD
 
 config GAMES_NXDOOM_KBDPATH
 	string "Keyboard device path"
-	default "/dev/kbd0"
+	default "/dev/xboxkbda"
 	---help---
 		Path to the keyboard device to use as input.
 
 endif # GAMES_NXDOOM_KEYBOARD
+
+if GAMES_NXDOOM_XBOX
+
+config GAMES_NXDOOM_XBOXPATH
+	string "Xbox device path"
+	default "/dev/xboxa"
+	---help---
+		Path to the xbox device to use as input.
+
+endif # GAMES_NXDOOM_XBOX
 
 config GAMES_NXDOOM_FB_CMAP
 	bool "Draw through the frame buffer colour map"

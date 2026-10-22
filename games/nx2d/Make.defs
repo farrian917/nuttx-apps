@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_GAMES_NX2D),)
+CONFIGURED_APPS += $(APPDIR)/games/nx2d
+endif

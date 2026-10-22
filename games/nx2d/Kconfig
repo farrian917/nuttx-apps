@@ -1,0 +1,18 @@
+config GAMES_NX2D
+	tristate "NX2D scrolling demo"
+	default n
+	depends on VIDEO_FB
+	---help---
+		Simple RGB565 framebuffer side-scrolling demo.
+
+if GAMES_NX2D
+config GAMES_NX2D_PROGNAME
+	string "Program name"
+	default "nx2d"
+config GAMES_NX2D_PRIORITY
+	int "Task priority"
+	default 100
+config GAMES_NX2D_STACKSIZE
+	int "Stack size"
+	default 4096
+endif

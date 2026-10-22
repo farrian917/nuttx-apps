@@ -587,7 +587,15 @@ static void set_video_mode(void)
 
 static void i_get_event(void)
 {
+  static unsigned int calls;
   int err;
+
+  calls++;
+
+  if ((calls % 100) == 0)
+    {
+      printf("DOOM INPUT POLL: calls=%u\n", calls);
+    }
 #if CONFIG_GAMES_NXDOOM_KEYBOARD
   struct keyboard_event_s kbdevent;
 
@@ -645,6 +653,22 @@ void i_start_frame(void)
 
 void i_start_tic(void)
 {
+  static clock_t last = 0;
+  clock_t now = clock_systime_ticks();
+
+  if (last != 0)
+    {
+      clock_t delta = now - last;
+
+      if (delta > MSEC2TICK(100))
+        {
+          printf("DOOM INPUT DELAY: %lu ms\n",
+                 (unsigned long)TICK2MSEC(delta));
+        }
+    }
+
+  last = now;
+
   if (!g_graphics_state.inited)
     {
       return;

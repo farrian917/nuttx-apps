@@ -40,6 +40,10 @@
 
 #include "dstrings.h"
 
+#include <sched.h>
+
+
+
 #ifdef CONFIG_GAMES_NXDOOM_SOUND
 #include "s_sound.h"
 #include "sounds.h"
@@ -771,7 +775,21 @@ static void d_run_frame(void)
 
   i_start_frame();
 
-  try_run_tics(); /* will run at least one tic */
+ // try_run_tics(); /* will run at least one tic */
+
+ {
+  clock_t start = clock_systime_ticks();
+
+  try_run_tics();
+
+  clock_t elapsed = clock_systime_ticks() - start;
+
+  if (elapsed > MSEC2TICK(100))
+    {
+      printf("DOOM TIC STALL: %lu ms\n",
+             (unsigned long)TICK2MSEC(elapsed));
+    }
+}
 
 #ifdef CONFIG_GAMES_NXDOOM_SOUND
   s_update_sounds(players[consoleplayer].mo); /* move positional sounds */
@@ -793,7 +811,21 @@ static void d_run_frame(void)
         {
           /* normal update */
 
-          i_finish_update(); /* page flip or blit buffer */
+         // i_finish_update(); /* page flip or blit buffer */
+
+         {
+  clock_t start = clock_systime_ticks();
+
+  i_finish_update();
+
+  clock_t elapsed = clock_systime_ticks() - start;
+
+  if (elapsed > MSEC2TICK(100))
+    {
+      printf("DOOM BLIT STALL: %lu ms\n",
+             (unsigned long)TICK2MSEC(elapsed));
+    }
+}
         }
     }
 }
@@ -1239,21 +1271,68 @@ static void print_game_version(void)
  * Send all the events of the given timestamp down the responder chain
  */
 
+// void d_process_events(void)
+// {
+//   event_t *ev;
+
+//   /* IF STORE DEMO, DO NOT ACCEPT INPUT */
+
+//   if (storedemo) return;
+
+//   while ((ev = d_pop_event()) != NULL)
+//     {
+//       if (m_responder(ev)) continue; /* menu ate the event */
+//       g_responder(ev);
+//     }
+// }
+
+// void d_process_events(void)
+// {
+//   event_t *ev;
+
+//   if (storedemo)
+//     {
+//       return;
+//     }
+
+//   while ((ev = d_pop_event()) != NULL)
+//     {
+//       bool handled;
+
+//       printf("DOOM PROCESS: type=%d key=%d\n",
+//              ev->type, ev->data1);
+
+//       handled = m_responder(ev);
+
+//       printf("DOOM MENU: handled=%d\n", handled);
+
+//       if (handled)
+//         {
+//           continue;
+//         }
+
+//       g_responder(ev);
+//     }
+// }
 void d_process_events(void)
 {
   event_t *ev;
 
-  /* IF STORE DEMO, DO NOT ACCEPT INPUT */
-
-  if (storedemo) return;
+  if (storedemo)
+    {
+      return;
+    }
 
   while ((ev = d_pop_event()) != NULL)
     {
-      if (m_responder(ev)) continue; /* menu ate the event */
+      if (m_responder(ev))
+        {
+          continue;
+        }
+
       g_responder(ev);
     }
 }
-
 /* d_doomloop */
 
 void d_doomloop(void)
@@ -1291,6 +1370,13 @@ void d_doomloop(void)
     {
       wipegamestate = gamestate;
     }
+
+    struct sched_param param;
+
+if (sched_getparam(0, &param) == 0)
+  {
+    printf("DOOM PRIORITY: %d\n", param.sched_priority);
+  }
 
   while (1)
     {

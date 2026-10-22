@@ -26,10 +26,20 @@
  ****************************************************************************/
 
 #include <stdio.h>
+#include <errno.h>
+#include <stdint.h>
+#include <string.h>
 
 #include "m_misc.h"
 #include "w_file.h"
 #include "z_zone.h"
+
+
+/****************************************************************************
+ * Defines
+ ****************************************************************************/
+
+#define WAD_READ_CHUNK 1024
 
 /****************************************************************************
  * Private Types
@@ -40,6 +50,8 @@ typedef struct
   wad_file_t wad;
   FILE *fstream;
 } stdc_wad_file_t;
+
+static uint8_t g_wad_read_buffer[WAD_READ_CHUNK] __attribute__((aligned(32)));
 
 /****************************************************************************
  * Private Function Prototypes
@@ -103,21 +115,67 @@ static void w_stdc_closefile(wad_file_t *wad)
  * provided buffer.  Returns the number of bytes read.
  */
 
-static size_t w_stdc_read(wad_file_t *wad, unsigned int offset, void *buffer,
-                          size_t buffer_len)
+// static size_t w_stdc_read(wad_file_t *wad, unsigned int offset, void *buffer,
+//                           size_t buffer_len)
+// {
+//   stdc_wad_file_t *stdc_wad;
+//   size_t result;
+
+//   stdc_wad = (stdc_wad_file_t *)wad;
+
+//   /* Jump to the specified position in the file. */
+
+//   fseek(stdc_wad->fstream, offset, SEEK_SET);
+
+//   /* Read into the buffer. */
+
+//   result = fread(buffer, 1, buffer_len, stdc_wad->fstream);
+
+//   return result;
+// }
+
+static size_t w_stdc_read(wad_file_t *wad, unsigned int offset,
+                          void *buffer, size_t buffer_len)
 {
-  stdc_wad_file_t *stdc_wad;
-  size_t result;
+  stdc_wad_file_t *stdc_wad = (stdc_wad_file_t *)wad;
+  uint8_t *dest = (uint8_t *)buffer;
+  size_t total = 0;
 
-  stdc_wad = (stdc_wad_file_t *)wad;
+  if (fseek(stdc_wad->fstream, (long)offset, SEEK_SET) != 0)
+    {
+      printf("WAD: fseek failed errno=%d\n", errno);
+      return 0;
+    }
 
-  /* Jump to the specified position in the file. */
+  printf("WAD: dest=%p temp=%p size=%lu\n",
+         buffer,
+         g_wad_read_buffer,
+         (unsigned long)buffer_len);
 
-  fseek(stdc_wad->fstream, offset, SEEK_SET);
+  while (total < buffer_len)
+    {
+      size_t remaining = buffer_len - total;
+      size_t chunk = remaining > WAD_READ_CHUNK ?
+                     WAD_READ_CHUNK : remaining;
 
-  /* Read into the buffer. */
+      size_t n = fread(g_wad_read_buffer, 1, chunk,
+                       stdc_wad->fstream);
 
-  result = fread(buffer, 1, buffer_len, stdc_wad->fstream);
+      if (n > 0)
+        {
+          memcpy(dest + total, g_wad_read_buffer, n);
+          total += n;
+        }
 
-  return result;
+      if (n != chunk)
+        {
+          printf("WAD: read failed offset=%lu total=%lu errno=%d\n",
+                 (unsigned long)offset,
+                 (unsigned long)total,
+                 errno);
+          break;
+        }
+    }
+
+  return total;
 }

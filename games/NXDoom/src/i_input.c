@@ -171,6 +171,10 @@ static int init_kbd_dev(struct keyboard_dev *dev)
     }
 
   dev->fd = open(CONFIG_GAMES_NXDOOM_KBDPATH, O_RDONLY | O_NONBLOCK);
+  printf("DOOM KBD: path=%s fd=%d errno=%d\n",
+       CONFIG_GAMES_NXDOOM_KBDPATH,
+       dev->fd,
+       dev->fd < 0 ? errno : 0);
   if (dev->fd < 0)
     {
       return errno;
@@ -373,40 +377,78 @@ static int get_typed_char(uint32_t sym)
  *
  ****************************************************************************/
 
+// int get_kbd_event(struct keyboard_event_s *sample)
+// {
+//   int err;
+//   ssize_t nbytes;
+
+//   /* Initialize the keyboard device if it isn't already */
+
+//   err = init_kbd_dev(&g_kbd_dev);
+//   if (err)
+//     {
+//       return err;
+//     }
+
+//   /* Read events until we're out of them */
+
+//   nbytes = read(g_kbd_dev.fd, sample, sizeof(*sample));
+//   if (nbytes < 0)
+//     {
+//       err = errno;
+//       if (err != EINTR)
+//         {
+//           return err;
+//         }
+//     }
+//   else if (nbytes != sizeof(*sample))
+//     {
+//       return EIO;
+//     }
+//   else if (nbytes == 0)
+//     {
+//       return EAGAIN; /* No event */
+//     }
+
+//   return 0;
+// }
+
 int get_kbd_event(struct keyboard_event_s *sample)
 {
   int err;
   ssize_t nbytes;
 
-  /* Initialize the keyboard device if it isn't already */
-
   err = init_kbd_dev(&g_kbd_dev);
-  if (err)
+  if (err != 0)
     {
       return err;
     }
 
-  /* Read events until we're out of them */
-
   nbytes = read(g_kbd_dev.fd, sample, sizeof(*sample));
+
+  if (nbytes == sizeof(*sample))
+    {
+      printf("DOOM KBD READ: code=%lu type=%d\n",
+             (unsigned long)sample->code,
+             sample->type);
+      return 0;
+    }
+
   if (nbytes < 0)
     {
-      err = errno;
-      if (err != EINTR)
-        {
-          return err;
-        }
-    }
-  else if (nbytes != sizeof(*sample))
-    {
-      return EIO;
-    }
-  else if (nbytes == 0)
-    {
-      return EAGAIN; /* No event */
+      return errno;
     }
 
-  return 0;
+  if (nbytes == 0)
+    {
+      return EAGAIN;
+    }
+
+  printf("DOOM KBD: unexpected read size=%ld expected=%lu\n",
+         (long)nbytes,
+         (unsigned long)sizeof(*sample));
+
+  return EIO;
 }
 #endif
 
@@ -415,6 +457,10 @@ void i_handle_keyboard_event(struct keyboard_event_s *kevent)
   /* XXX: passing pointers to event for access after this function
    * has terminated is undefined behaviour
    */
+
+   printf("DOOM EVENT: code=%lu type=%d\n",
+       (unsigned long)kevent->code,
+       kevent->type);
 
   event_t event;
   bool press;
@@ -475,6 +521,11 @@ void i_handle_keyboard_event(struct keyboard_event_s *kevent)
       event.data2 = 0;
       event.data3 = 0;
     }
+
+    printf("DOOM POST: input=%lu key=%d type=%d\n",
+       (unsigned long)kevent->code,
+       event.data1,
+       event.type);
 
   d_post_event(&event);
 }
