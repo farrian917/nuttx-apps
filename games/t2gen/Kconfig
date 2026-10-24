@@ -1,0 +1,26 @@
+config GAMES_T2GEN
+    tristate "T2 Genesis ROM / 68000 startup interpreter / framebuffer probe"
+    default n
+    help
+        Validate and load a Genesis ROM image from SD into RAM.
+        This first milestone is not yet a playable emulator.
+
+if GAMES_T2GEN
+config GAMES_T2GEN_PROGNAME
+    string "Program name"
+    default "t2gen"
+config GAMES_T2GEN_PRIORITY
+    int "Task priority"
+    default 100
+config GAMES_T2GEN_STACKSIZE
+    int "Stack size"
+    default 16384
+endif
+
+config GAMES_T2GEN_MUSASHI
+    bool "Use external Musashi 68000 core (requires vendored sources)"
+    default n
+    depends on GAMES_T2GEN
+    help
+      Enable only after copying Musashi m68kcpu.c, m68kops.c and headers
+      into src/musashi/. This is a CPU/bus diagnostic, not a playable game.

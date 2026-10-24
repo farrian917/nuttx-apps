@@ -1,0 +1,1 @@
+T2GEN V8.6: 20M CPU cycles (~156 NTSC frames); live LTDC L8 framebuffer snapshots every fourth VBlank. Existing tile renderer, diagnostics and emulation preserved. No wall-clock pacing; sprites/scrolling not implemented yet. Build on target unverified.

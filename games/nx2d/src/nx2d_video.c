@@ -16,15 +16,15 @@
 static struct nx2d_sprite_s g_player_sprite;
 static bool g_sprite_loaded;
 static uint16_t g_xmap[1024];
-static uint32_t g_scaled_words[256];
+static uint32_t g_scaled_words[256] __attribute__((aligned(8)));
 static uint8_t *const g_scaled_row = (uint8_t *)g_scaled_words;
 /* 0=memcpy, 1=word32, 2=unroll, 3=rowcopy, 4=burst16, 5=packed,
- * 6=ratio (exact 5:16 horizontal scaling), 7=ratio16 (16-word writes). */
+ * 6=ratio (exact 5:16 horizontal scaling), 7=ratio16 (16-word writes), 8=ratio64 (aligned 64-bit writes). */
 static unsigned g_scaler_mode;
 static const char *nx2d_scaler_name(unsigned mode)
 {
-  static const char *const names[] = {"memcpy", "word32", "unroll", "rowcopy", "burst16", "packed", "ratio", "ratio16"};
-  return names[mode < 8 ? mode : 6];
+  static const char *const names[] = {"memcpy", "word32", "unroll", "rowcopy", "burst16", "packed", "ratio", "ratio16", "ratio64"};
+  return names[mode < 9 ? mode : 6];
 }
 static void nx2d_copy_words(uint8_t *dst, const uint32_t *src);
 static void nx2d_copy_unrolled(uint8_t *dst, const uint32_t *src)
@@ -58,6 +58,29 @@ static void nx2d_copy_burst16(uint8_t *dst, const uint32_t *src)
  * This avoids the intermediate byte expansion pass; only done once per
  * distinct logical source row, then reused for all duplicate output rows.
  */
+/* Experimental 64-bit sequential SDRAM stores. Both pointers must be
+ * 8-byte aligned. This path is for benchmarking only: actual throughput
+ * depends on MPU attributes, FMC bus arbitration and LTDC activity.
+ * No cache/MPU settings are changed here. */
+static void nx2d_copy_words64(uint8_t *dst, const uint32_t *src)
+{
+  if ((((uintptr_t)dst | (uintptr_t)src) & 7u) != 0)
+    {
+      nx2d_copy_burst16(dst, src);
+      return;
+    }
+
+  uint64_t *d = (uint64_t *)(void *)dst;
+  const uint64_t *s = (const uint64_t *)(const void *)src;
+  for (unsigned i = 0; i < 128; i += 8)
+    {
+      d[i+0] = s[i+0]; d[i+1] = s[i+1];
+      d[i+2] = s[i+2]; d[i+3] = s[i+3];
+      d[i+4] = s[i+4]; d[i+5] = s[i+5];
+      d[i+6] = s[i+6]; d[i+7] = s[i+7];
+    }
+}
+
 static void nx2d_expand_packed(const uint8_t *src)
 {
   for (unsigned i = 0; i < 256; ++i)
@@ -92,7 +115,9 @@ static void nx2d_expand_ratio(const uint8_t *src)
 static void nx2d_scale_copy(uint8_t *dst, const uint8_t *prev,
                             bool duplicate)
 {
-  if (g_scaler_mode == 3 && duplicate)
+  if (g_scaler_mode == 8)
+    nx2d_copy_words64(dst, g_scaled_words);
+  else if (g_scaler_mode == 3 && duplicate)
     memcpy(dst, prev, 1024);
   else if (g_scaler_mode == 0)
     memcpy(dst, g_scaled_row, 1024);
@@ -104,6 +129,28 @@ static void nx2d_scale_copy(uint8_t *dst, const uint8_t *prev,
     nx2d_copy_unrolled(dst, g_scaled_words);
 }
 
+/* V20 DWT section counters. Single-threaded draw loop; read after frame wait. */
+#if defined(__ARM_ARCH_7EM__) || defined(__ARM_ARCH_7M__)
+# define NX2D_VIDEO_DWT_CTRL (*(volatile uint32_t *)0xe0001000)
+# define NX2D_VIDEO_DWT_CYCCNT (*(volatile uint32_t *)0xe0001004)
+static inline uint32_t nx2d_video_cycles(void)
+{
+  return NX2D_VIDEO_DWT_CYCCNT;
+}
+#else
+static inline uint32_t nx2d_video_cycles(void) { return 0; }
+#endif
+struct nx2d_video_cycles_s
+{
+  uint64_t bg, map, objects, expand, fbwrite;
+  uint32_t frames;
+};
+static struct nx2d_video_cycles_s g_v19_cycles;
+void nx2d_video_profile_take(struct nx2d_video_cycles_s *out)
+{
+  *out = g_v19_cycles;
+  memset(&g_v19_cycles, 0, sizeof(g_v19_cycles));
+}
 static uint64_t g_compose_us, g_scale_us;
 static uint64_t g_bg_us, g_map_us, g_objects_us;
 static uint64_t g_expand_us, g_write_us;
@@ -437,14 +484,17 @@ void nx2d_video_set_background(unsigned mode)
 
 void nx2d_video_draw(struct nx2d_video_s *v, const struct nx2d_game_s *g)
 {
+  uint32_t c_bg0 = nx2d_video_cycles();
   uint64_t t0 = nx2d_us();
   /* Draw map in world coordinates into the 320x224 L8 backbuffer. */
   if (g_bg_mode) nx2d_parallax_spans(v->backbuffer, g->camera);
   else nx2d_parallax_classic(v->backbuffer, g->camera);
   uint64_t tbg = nx2d_us();
+  uint32_t c_bg1 = nx2d_video_cycles();
   nx2d_tilemap_draw(&g_nx2d_demo_level, v->backbuffer,
                     NX2D_W, NX2D_W, NX2D_H, g->camera, 0);
   uint64_t tmap = nx2d_us();
+  uint32_t c_map1 = nx2d_video_cycles();
 
   /* Player is positioned in world space and drawn in screen space. */
   int px = (g->x >> 16) - g->camera;
@@ -539,6 +589,32 @@ void nx2d_video_draw(struct nx2d_video_s *v, const struct nx2d_game_s *g)
       logical_rect(v, fx->x - g->camera - radius / 2,
                    fx->y - radius / 2, radius, radius, 0xffff);
     }
+  /* V16 checkpoints: visible world-space posts. Activated posts glow. */
+  for (unsigned i = 1; i <= 2; ++i)
+    {
+      const int world_x = i == 1 ? 600 : 1200;
+      const int sy = 154;
+      const int sx = world_x - g->camera;
+      if (sx < -10 || sx >= NX2D_W) continue;
+      const uint32_t pole = g->checkpoint >= i ? 0x07e0 : 0x7bef;
+      logical_rect(v, sx + 3, sy, 2, 40, pole);
+      logical_rect(v, sx + 5, sy + 2, 11, 7,
+                   g->checkpoint >= i ? 0xffe0 : 0xf800);
+    }
+
+  /* V15 collectibles: simple animated 8x8 tokens, drawn in screen space.
+   * A two-pixel highlight alternates every 8 simulation ticks. */
+  for (unsigned i = 0; i < NX2D_MAX_PICKUPS; ++i)
+    {
+      const struct nx2d_pickup_s *p = &g->pickups[i];
+      if (!p->active) continue;
+      int sx = p->x - g->camera;
+      if (sx < -8 || sx >= NX2D_W) continue;
+      logical_rect(v, sx + 2, p->y, 4, 8, 0xffe0);
+      logical_rect(v, sx, p->y + 2, 8, 4, 0xffe0);
+      logical_rect(v, sx + ((g->ticks / 8) & 1u ? 4 : 2),
+                   p->y + 2, 2, 2, 0xffff);
+    }
   /* HUD: health, kills, selected weapon. */
   logical_rect(v, 0, 0, 112, 12, 0x0000);
   for (unsigned i = 0; i < g->hp; i++)
@@ -550,7 +626,20 @@ void nx2d_video_draw(struct nx2d_video_s *v, const struct nx2d_game_s *g)
   for (unsigned i = 0; i < g->kills; i++)
     logical_rect(v, 76 + (int)i * 5, 4, 3, 4, 0xffe0);
 
+  /* Score progress: one gold marker per collected token.
+   * Keep HUD writes bounded, even when more levels are added later. */
+  logical_rect(v, 156, 0, 112, 12, 0x0000);
+  unsigned shown = g->pickups_collected;
+  if (shown > NX2D_MAX_PICKUPS) shown = NX2D_MAX_PICKUPS;
+  for (unsigned i = 0; i < shown; ++i)
+    logical_rect(v, 160 + (int)i * 10, 3, 7, 6, 0xffe0);
+
   uint64_t t1 = nx2d_us();
+  uint32_t c_obj1 = nx2d_video_cycles();
+  g_v19_cycles.bg += (uint32_t)(c_bg1 - c_bg0);
+  g_v19_cycles.map += (uint32_t)(c_map1 - c_bg1);
+  g_v19_cycles.objects += (uint32_t)(c_obj1 - c_map1);
+  g_v19_cycles.frames++;
   g_bg_us += tbg - t0;
   g_map_us += tmap - tbg;
   g_objects_us += t1 - tmap;
@@ -559,6 +648,7 @@ void nx2d_video_draw(struct nx2d_video_s *v, const struct nx2d_game_s *g)
   if (v->width != 1024 || v->height != 600) return;
   unsigned previous_sy = NX2D_H;
   uint64_t expand_ticks = 0, write_ticks = 0;
+  uint32_t expand_cycles = 0, write_cycles = 0;
   for (unsigned y = 0; y < 600; ++y)
     {
       unsigned sy = y * NX2D_H / 600;
@@ -567,30 +657,36 @@ void nx2d_video_draw(struct nx2d_video_s *v, const struct nx2d_game_s *g)
       if (!duplicate)
         {
           const uint8_t *src = v->backbuffer + (size_t)sy * NX2D_W;
+          uint32_t ca = nx2d_video_cycles();
           uint64_t ta = nx2d_us();
           if (g_scaler_mode == 5)
             nx2d_expand_packed(src);
-          else if (g_scaler_mode == 6 || g_scaler_mode == 7)
+          else if (g_scaler_mode == 6 || g_scaler_mode == 7 || g_scaler_mode == 8)
             nx2d_expand_ratio(src);
           else
             for (unsigned x = 0; x < 1024; ++x)
               g_scaled_row[x] = src[g_xmap[x]];
           expand_ticks += nx2d_us() - ta;
+          expand_cycles += (uint32_t)(nx2d_video_cycles() - ca);
           previous_sy = sy;
         }
       const uint8_t *prev = y ? dst - v->stride : NULL;
+      uint32_t cw = nx2d_video_cycles();
       uint64_t tw = nx2d_us();
       nx2d_scale_copy(dst, prev, duplicate && y != 0);
       write_ticks += nx2d_us() - tw;
+      write_cycles += (uint32_t)(nx2d_video_cycles() - cw);
     }
   uint64_t t2 = nx2d_us();
+  g_v19_cycles.expand += expand_cycles;
+  g_v19_cycles.fbwrite += write_cycles;
   g_compose_us += t1 - t0;
   g_scale_us += t2 - t1;
   g_expand_us += expand_ticks;
   g_write_us += write_ticks;
   if (++g_profile_frames >= 120)
     {
-      if (g_detailed_profile)
+      if (false && g_detailed_profile)
         {
       printf("NX2D PERF: bg=%lu map=%lu objects=%lu us avg/120\n",
              (unsigned long)(g_bg_us / g_profile_frames),

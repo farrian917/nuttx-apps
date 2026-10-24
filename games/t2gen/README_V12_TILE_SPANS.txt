@@ -1,0 +1,1 @@
+T2GEN V12: background planes rasterized in tile spans, split at 16-pixel column-scroll boundaries. Window overlay and sprite priority retained. No hardware test or cross-compilation performed. Benchmark against V11.

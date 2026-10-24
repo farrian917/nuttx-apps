@@ -26,6 +26,11 @@ struct nx2d_bullet_s {
   int16_t x, y, vx;
   uint8_t active, enemy;
 };
+#define NX2D_MAX_PICKUPS 10
+struct nx2d_pickup_s {
+  int16_t x, y;
+  uint8_t active;
+};
 #define NX2D_MAX_EFFECTS 12
 struct nx2d_effect_s { int16_t x, y; uint8_t age, active; };
 struct nx2d_enemy_s {
@@ -43,6 +48,11 @@ struct nx2d_game_s {
   uint32_t last_shot;
   uint16_t invulnerable;
   uint8_t hp, kills, weapon, previous_weapon;
+  uint16_t score;
+  uint8_t checkpoint;
+  uint8_t deaths;
+  uint8_t pickups_collected;
+  struct nx2d_pickup_s pickups[NX2D_MAX_PICKUPS];
   struct nx2d_effect_s effects[NX2D_MAX_EFFECTS];
   struct nx2d_bullet_s bullets[NX2D_MAX_BULLETS];
   struct nx2d_enemy_s enemies[NX2D_MAX_ENEMIES];

@@ -1,0 +1,1 @@
+T2GEN V8.2 diagnostics-only update from V8.1. Adds bounded CTRL/DATA traces, DMA before/after statistics, reset logging and summary. Emulation logic unchanged. Build with your NuttX tree; hardware build not verified.

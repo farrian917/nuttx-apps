@@ -74,6 +74,20 @@ void nx2d_game_init(struct nx2d_game_s *g)
   g->grounded = true;
   g->hp = 5;
   g->last_shot = 0;
+  /* V15: lightweight world-space collectibles, positioned above safe
+   * standing surfaces. No heap allocation or extra sprite assets. */
+  static const int16_t pickup_x[NX2D_MAX_PICKUPS] =
+    {100, 180, 300, 450, 620, 790, 950, 1100, 1250, 1400};
+  for (unsigned i = 0; i < NX2D_MAX_PICKUPS; ++i)
+    {
+      int sy = enemy_spawn_y(pickup_x[i]);
+      if (sy >= 0)
+        {
+          g->pickups[i].x = pickup_x[i] + 4;
+          g->pickups[i].y = (int16_t)(sy + 8);
+          g->pickups[i].active = 1;
+        }
+    }
   /* Fixed demonstration spawns, placed on the main ground. */
   static const int16_t spawn_x[] = {230, 400, 570, 760, 960, 1130};
   for (unsigned i = 0; i < sizeof(spawn_x) / sizeof(spawn_x[0]); i++)
@@ -100,6 +114,39 @@ void nx2d_game_init(struct nx2d_game_s *g)
       if (g->enemies[i].type == 2 && g->enemies[i].active)
         g->enemies[i].y -= 52;
     }
+}
+
+/* V16 checkpoint respawn: preserve level progress, collected pickups and
+ * defeated enemies. Only the player and active projectiles are reset. */
+static void nx2d_respawn(struct nx2d_game_s *g)
+{
+  if (!g->checkpoint)
+    {
+      nx2d_game_init(g);
+      return;
+    }
+
+  const int spawn_x = g->checkpoint == 1 ? 600 : 1200;
+  int spawn_y = enemy_spawn_y(spawn_x);
+  if (spawn_y < 0)
+    {
+      nx2d_game_init(g);
+      return;
+    }
+
+  g->x = FX(spawn_x);
+  g->y = FX(spawn_y);
+  g->vx = 0;
+  g->vy = 0;
+  g->grounded = true;
+  g->hp = 5;
+  g->invulnerable = 120;
+  g->firing = false;
+  g->previous_weapon = 0;
+  g->last_shot = g->ticks;
+  if (g->deaths < 255) g->deaths++;
+  memset(g->bullets, 0, sizeof(g->bullets));
+  memset(g->effects, 0, sizeof(g->effects));
 }
 
 void nx2d_game_step(struct nx2d_game_s *g, uint32_t buttons)
@@ -159,6 +206,28 @@ void nx2d_game_step(struct nx2d_game_s *g, uint32_t buttons)
                                      x + PLAYER_W / 2, NX2D_W);
   if (g->camera > map_width - NX2D_W)
     g->camera = map_width - NX2D_W;
+  /* Activate checkpoints when the player crosses their world X position. */
+  if (x >= 1200)
+    g->checkpoint = 2;
+  else if (x >= 600 && g->checkpoint < 1)
+    g->checkpoint = 1;
+
+  /* V15: collect tokens when the player's bounding box overlaps.
+   * This check runs only ten times per frame and is camera-independent. */
+  for (unsigned i = 0; i < NX2D_MAX_PICKUPS; ++i)
+    {
+      struct nx2d_pickup_s *p = &g->pickups[i];
+      if (p->active && x < p->x + 8 && x + PLAYER_W > p->x &&
+          y < p->y + 8 && y + PLAYER_H > p->y)
+        {
+          p->active = 0;
+          g->score += 100;
+          g->pickups_collected++;
+          /* Reward collecting five tokens with one health point. */
+          if (g->pickups_collected % 5 == 0 && g->hp < 5)
+            g->hp++;
+        }
+    }
   /* Edge-triggered weapon switching: pistol -> automatic -> shotgun. */
   if ((buttons & NX2D_BUTTON_WEAPON) && !g->previous_weapon)
     g->weapon = (g->weapon + 1) % 3;
@@ -208,7 +277,7 @@ void nx2d_game_step(struct nx2d_game_s *g, uint32_t buttons)
                   b->active = 0;
                   if (g->hp) g->hp--;
                   g->invulnerable = 90;
-                  if (!g->hp) { nx2d_game_init(g); return; }
+                  if (!g->hp) { nx2d_respawn(g); return; }
                 }
             }
           else
@@ -226,6 +295,9 @@ void nx2d_game_step(struct nx2d_game_s *g, uint32_t buttons)
                           e->dying = 1;
                           e->death_age = 0;
                           g->kills++;
+                          /* Award points once per defeated enemy. */
+                          if (g->score <= UINT16_MAX - 250)
+                            g->score += 250;
                           for (unsigned q = 0; q < NX2D_MAX_EFFECTS; q++)
                             if (!g->effects[q].active)
                               {
@@ -316,8 +388,8 @@ void nx2d_game_step(struct nx2d_game_s *g, uint32_t buttons)
           g->invulnerable = 90;
           if (g->hp == 0)
             {
-              /* Restart demonstration after losing all health. */
-              nx2d_game_init(g);
+              /* Respawn at the last activated checkpoint. */
+              nx2d_respawn(g);
               return;
             }
         }

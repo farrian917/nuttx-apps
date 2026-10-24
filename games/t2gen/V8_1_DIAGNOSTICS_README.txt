@@ -1,0 +1,1 @@
+T2GEN V8.1 complete project based on V8. Adds VRAM/CRAM/VSRAM/tilemap diagnostics immediately before framebuffer snapshot. No renderer behavior changes. Build with NuttX apps/games/t2gen. Run: t2gen /mnt/t2.gen /dev/fb0. This project has not been compiled against the target NuttX configuration.

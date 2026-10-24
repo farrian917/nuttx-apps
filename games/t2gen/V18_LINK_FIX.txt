@@ -1,0 +1,1 @@
+V18 link fix: src/t2gen_main.c exports t2gen_main explicitly for NuttX built-in registration. After replacing the directory, run make clean in apps/games/t2gen or a full clean rebuild to eliminate stale objects.

@@ -1,0 +1,7 @@
+T2GEN V17 packed L8 compositor
+
+Based on V16. Changes the final 2x horizontal L8 expansion from two byte stores per source pixel to one uint16_t store containing two copies of the palette index. Applied to normal and diagnostic views, for both DMA staging and CPU fallback. Preserves V14 bus fast paths, V15 layer priority lookup, V16 sprite spans, and V13 profiling.
+
+Requires even-aligned framebuffer row start and staging row start, as currently supplied by the 1024-byte stride, even x offset and 640-byte staging pitch. If board geometry changes, check alignment. No MPU or Musashi changes.
+
+Benchmark CPU-only and video with identical controller connection states. This is an untested optimization; verify rendered colors and FPS on hardware.
