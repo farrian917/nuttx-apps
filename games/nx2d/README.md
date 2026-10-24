@@ -17,3 +17,14 @@ The input adapter expects an existing device that returns a **4-byte bitmask** i
 - DMA2D acceleration and off-screen double buffering are intentionally not yet implemented. A DMA2D backend needs verified STM32H7 DMA2D API and SDRAM address/cache configuration.
 - No tile collision, sprites, audio, or assets yet.
 - The sample uses `clock_nanosleep`; replace with a relative sleep if your NuttX configuration does not provide it.
+
+## STM32H743 LTDC L8 variant
+Requires CONFIG_STM32_LTDC_L1_L8=y and CONFIG_FB_CMAP=y.
+The framebuffer is written as palette indices, and FBIOPUT_CMAP installs an RGB332-derived 256-color CLUT.
+Run: nx2d /dev/fb0
+The engine still renders a centered 320x224 viewport without scaling, and has no DMA2D acceleration yet.
+IMPORTANT: Ensure LTDC framebuffer SDRAM is noncacheable or cleaned after CPU writes.
+The game palette is not restored on exit.
+
+## Flicker correction
+The game now composes each 320x224 frame offscreen, clips all sprites to the viewport, then copies complete scanlines to the LTDC framebuffer. This is not true hardware double buffering; LTDC tearing and Cortex-M7 D-cache coherency still require board-specific work.
