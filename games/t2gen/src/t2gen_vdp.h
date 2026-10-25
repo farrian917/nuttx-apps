@@ -10,6 +10,9 @@
 struct t2gen_vdp_s
 {
   uint8_t vram[T2GEN_VRAM_SIZE];
+  /* V0.30: generation of each 32-byte pattern; writes invalidate tiles. */
+  uint32_t tile_version[2048];
+  uint32_t tile_reset_serial;
   uint16_t cram[64];
   uint16_t vsram[40];
   uint8_t reg[24];

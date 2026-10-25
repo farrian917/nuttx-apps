@@ -15,6 +15,37 @@ config GAMES_T2GEN_PRIORITY
 config GAMES_T2GEN_STACKSIZE
     int "Stack size"
     default 16384
+config GAMES_T2GEN_V028_PC_HASH_DISPATCH
+    bool "V0.28 low-five-bit PC dispatch for eight native polling instructions"
+    default n
+    depends on GAMES_T2GEN_MUSASHI && GAMES_T2GEN_V027_FAST_POLL
+    help
+      Replace V0.27's eight sequential full-PC comparisons with a
+      collision-free 32-slot switch on the low five PC bits. Every hit
+      still validates the full PC and opcode. Preserves native handlers,
+      instruction boundaries, cycles, and Musashi fallback. Toggle off
+      for an A/B comparison against V0.27.
+
+config GAMES_T2GEN_V027_FAST_POLL
+    bool "V0.27 fast PC dispatch for native polling loops (experimental)"
+    default n
+    depends on GAMES_T2GEN_MUSASHI && GAMES_T2GEN_V016_SWITCH_DISPATCH
+    help
+      Route known ROM polling instructions before the large PPC switch.
+      Retains opcode checks, original bus reads, flags, cycles and trace.
+      For comparison, enable V0.20 direct branch and V0.23 native 5670.
+      Turn this option off to restore V0.26 behavior.
+
+config GAMES_T2GEN_V026_FAST_DISPATCH
+    bool "V0.26 opcode-first fast dispatch for native MOVEQ/DBF"
+    default n
+    depends on GAMES_T2GEN_MUSASHI && GAMES_T2GEN_V016_SWITCH_DISPATCH
+    help
+      Bypass the ROM-PC switch for fully decoded MOVEQ and DBF opcodes.
+      Requires V0.25 MOVEQ and/or V0.24 DBF for measurable effect.
+      Uses their existing counters and preserves original cycle/IRQ
+      epilogue. Compare with option disabled on the same hardware.
+
 endif
 
 config GAMES_T2GEN_MUSASHI

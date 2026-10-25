@@ -1,4 +1,10 @@
-/* T2GEN V9.1: Genesis Mode 5 plane composition and debug views.
+/* T2GEN V0.38: optional AXI SRAM resident decoded tile cache.
+ * T2GEN V0.37: DWT cycle-level SRAM versus SDRAM access probes.
+ * T2GEN V0.36: low-overhead SDRAM/tile-cache bandwidth probes.
+ * T2GEN V0.35: span-specialized fused compositor.
+ * T2GEN V0.34: fused background, priority and L8 output.
+ * T2GEN V0.33: fast full-scroll background plane composition.
+ * T2GEN V9.1: Genesis Mode 5 plane composition and debug views.
  * 1024x600 NuttX L8 framebuffer; no window plane or shadow/highlight.
  */
 #include <stdint.h>
@@ -45,21 +51,64 @@ static uint16_t vrword(const struct t2gen_vdp_s *v, uint32_t addr)
  */
 #define T2GEN_TILE_COUNT 2048u
 #define T2GEN_TILE_BYTES 64u
+/* V0.38.2: SRAM1 tile cache. Requires flash.ld section:
+ * .t2_tile_cache (NOLOAD) : { . = ALIGN(32); KEEP(*(.t2_tile_cache))
+ *                             . = ALIGN(32); } > sram1
+ * SRAM1 must NOT be registered as a NuttX heap or used by other sections.
+ * Disable with -DT2GEN_V038_SRAM1_TILE_CACHE=0 to use heap fallback.
+ */
+#ifndef T2GEN_V038_SRAM1_TILE_CACHE
+# define T2GEN_V038_SRAM1_TILE_CACHE 1
+#endif
+#if T2GEN_V038_SRAM1_TILE_CACHE
+static uint8_t g_v038_sram1_tile_cache[T2GEN_TILE_COUNT * T2GEN_TILE_BYTES]
+  __attribute__((section(".t2_tile_cache"), aligned(32), used));
+#endif
 static uint8_t *g_tile_cache;
-static uint16_t g_tile_stamp[T2GEN_TILE_COUNT];
-static uint16_t g_tile_epoch;
+static bool g_v038_cache_reported;
+static const char *g_v038_cache_region = "unallocated";
+
+static uint32_t g_tile_stamp[T2GEN_TILE_COUNT];
+static uint32_t g_cache_reset_serial = UINT32_MAX;
+static uint32_t g_tile_hits;
 static uint32_t g_tile_misses;
 static bool g_cache_ready;
 
-static void tile_cache_begin(void)
+static void tile_cache_begin(const struct t2gen_vdp_s *v)
 {
   if (!g_tile_cache)
-    g_tile_cache = (uint8_t *)malloc(T2GEN_TILE_COUNT * T2GEN_TILE_BYTES);
-  g_cache_ready = g_tile_cache != NULL;
-  if (++g_tile_epoch == 0)
     {
-      memset(g_tile_stamp, 0, sizeof(g_tile_stamp));
-      g_tile_epoch = 1;
+#if T2GEN_V038_SRAM1_TILE_CACHE
+      /* Confirm the entire 128 KiB buffer resides inside SRAM1. */
+      uintptr_t addr = (uintptr_t)g_v038_sram1_tile_cache;
+      if (addr == 0x30000000u)
+        {
+          g_tile_cache = g_v038_sram1_tile_cache;
+          g_v038_cache_region = "SRAM1";
+        }
+#endif
+      if (!g_tile_cache)
+        {
+          g_tile_cache = (uint8_t *)malloc(T2GEN_TILE_COUNT * T2GEN_TILE_BYTES);
+          g_v038_cache_region = g_tile_cache ? "HEAP_FALLBACK" : "FAILED";
+        }
+      if (g_tile_cache)
+        memset(g_tile_stamp, 0xff, sizeof(g_tile_stamp));
+    }
+  g_cache_ready = g_tile_cache != NULL;
+  if (!g_v038_cache_reported)
+    {
+      printf("T2GEN V0.38 TILE_CACHE: region=%s ptr=%p bytes=%u "
+             "sram1_enabled=%u ready=%u\n",
+             g_v038_cache_region, (void *)g_tile_cache,
+             T2GEN_TILE_COUNT * T2GEN_TILE_BYTES,
+             (unsigned)T2GEN_V038_SRAM1_TILE_CACHE, (unsigned)g_cache_ready);
+      g_v038_cache_reported = true;
+    }
+  if (g_cache_reset_serial != v->tile_reset_serial)
+    {
+      memset(g_tile_stamp, 0xff, sizeof(g_tile_stamp));
+      g_cache_reset_serial = v->tile_reset_serial;
     }
 }
 
@@ -73,7 +122,7 @@ static inline uint8_t tile_pixel(const struct t2gen_vdp_s *v,
   uint8_t pixel;
   if (g_cache_ready)
     {
-      if (g_tile_stamp[tile] != g_tile_epoch)
+      if (g_tile_stamp[tile] != v->tile_version[tile])
         {
           uint8_t *out = g_tile_cache + tile * 64u;
           unsigned addr = tile * 32u;
@@ -84,9 +133,10 @@ static inline uint8_t tile_pixel(const struct t2gen_vdp_s *v,
                 out[row * 8u + col * 2u] = pair >> 4;
                 out[row * 8u + col * 2u + 1u] = pair & 15u;
               }
-          g_tile_stamp[tile] = g_tile_epoch;
+          g_tile_stamp[tile] = v->tile_version[tile];
           ++g_tile_misses;
         }
+      else ++g_tile_hits;
       pixel = g_tile_cache[tile * 64u + py * 8u + px];
     }
   else
@@ -105,7 +155,7 @@ static inline const uint8_t *tile_row_cached(const struct t2gen_vdp_s *v,
   unsigned tile = entry & 0x07ffu;
   unsigned py = y & 7u;
   if (entry & 0x1000u) py = 7u - py;
-  if (g_tile_stamp[tile] != g_tile_epoch)
+  if (g_tile_stamp[tile] != v->tile_version[tile])
     {
       uint8_t *out = g_tile_cache + tile * 64u;
       unsigned addr = tile * 32u;
@@ -116,9 +166,10 @@ static inline const uint8_t *tile_row_cached(const struct t2gen_vdp_s *v,
             out[row * 8u + col * 2u] = pair >> 4;
             out[row * 8u + col * 2u + 1u] = pair & 15u;
           }
-      g_tile_stamp[tile] = g_tile_epoch;
+      g_tile_stamp[tile] = v->tile_version[tile];
       ++g_tile_misses;
     }
+  else ++g_tile_hits;
   return g_tile_cache + tile * 64u + py * 8u;
 }
 static inline uint8_t tile_row_pixel(const uint8_t *row,
@@ -190,6 +241,180 @@ static uint16_t window_entry(const struct t2gen_vdp_s *v,
 /* V20: one 16-bit lane per plane pixel: low byte is palette index,
  * bit 8 is tile priority. The high bit remains set even for transparent
  * pixels, preserving the old separate-priority-buffer semantics. */
+/* V0.33: specialized full-plane vertical scroll renderer. With VDP R11
+ * column-scroll disabled, every pixel in a scanline shares the same Y.
+ * Resolve the tile row once per horizontal span and avoid the per-span
+ * scroll-array read and repeated Y/table calculations. The generic path
+ * below remains active for column-scroll and diagnostic modes. */
+static void background_scanline_fullscroll(const struct t2gen_vdp_s *v,
+                                           unsigned plane, unsigned y,
+                                           unsigned width, unsigned cols,
+                                           unsigned rows, int hs,
+                                           int16_t vs, uint16_t *out)
+{
+  const unsigned xmask = cols * 8u - 1u;
+  const unsigned sy = (y + (unsigned)vs) & (rows * 8u - 1u);
+  const uint32_t base = plane == 0u ?
+      (((uint32_t)(v->reg[2] & 0x38u) << 10) & 65535u) :
+      (((uint32_t)(v->reg[4] & 7u) << 13) & 65535u);
+  const uint32_t rowbase = base +
+      (((sy >> 3) & (rows - 1u)) * cols << 1);
+  unsigned x = 0u;
+  while (x < width)
+    {
+      unsigned sx = ((unsigned)((int)x - hs)) & xmask;
+      unsigned tx = sx & 7u;
+      unsigned n = 8u - tx;
+      if (n > width - x) n = width - x;
+      uint16_t entry = vrword(v, rowbase +
+                                  (((sx >> 3) & (cols - 1u)) << 1));
+      const uint16_t pal = (uint16_t)(((entry >> 13) & 3u) << 4);
+      const uint16_t pri = (entry & 0x8000u) ? 0x100u : 0u;
+      if (g_cache_ready)
+        {
+          const uint8_t *row = tile_row_cached(v, entry, sy);
+          if (entry & 0x0800u)
+            {
+              for (unsigned k = 0; k < n; ++k)
+                {
+                  uint8_t c = row[7u - tx - k];
+                  out[x + k] = pri | (c ? (pal | c) : 0u);
+                }
+            }
+          else
+            {
+              for (unsigned k = 0; k < n; ++k)
+                {
+                  uint8_t c = row[tx + k];
+                  out[x + k] = pri | (c ? (pal | c) : 0u);
+                }
+            }
+        }
+      else
+        {
+          for (unsigned k = 0; k < n; ++k)
+            out[x + k] = pri | tile_pixel(v, entry, sx + k, sy);
+        }
+      x += n;
+    }
+}
+
+/* V0.34: fused full-scroll background + priority + L8 pair generation.
+ * One traversal, no 2x320 uint16_t plane scanline buffers and no separate
+ * background-to-mixer pass. The slow path is retained for window/column
+ * scrolling and diagnostic views. Each plane's tile row is resolved only
+ * when its source X crosses a tile boundary. */
+static void fused_scanline_fullscroll(const struct t2gen_vdp_s *v,
+                                      unsigned y, unsigned width,
+                                      unsigned cols, unsigned rows,
+                                      int hs_a, int hs_b,
+                                      int16_t vs_a, int16_t vs_b,
+                                      const uint8_t *sprite_lo,
+                                      const uint8_t *sprite_hi,
+                                      uint16_t *dst,
+                                      unsigned *nonzero,
+                                      unsigned *sprite_pixels)
+{
+  const unsigned xmask = cols * 8u - 1u;
+  const unsigned ymask = rows * 8u - 1u;
+  const unsigned ya = (y + (unsigned)vs_a) & ymask;
+  const unsigned yb = (y + (unsigned)vs_b) & ymask;
+  const uint32_t abase = (((uint32_t)(v->reg[2] & 0x38u) << 10) & 65535u) +
+                         ((ya >> 3) * cols << 1);
+  const uint32_t bbase = (((uint32_t)(v->reg[4] & 7u) << 13) & 65535u) +
+                         ((yb >> 3) * cols << 1);
+  const uint8_t backdrop = v->reg[7] & 0x3fu;
+  unsigned nz = 0, sp = 0;
+  unsigned x = 0;
+  while (x < width)
+    {
+      unsigned xa = ((unsigned)((int)x - hs_a)) & xmask;
+      unsigned xb = ((unsigned)((int)x - hs_b)) & xmask;
+      unsigned n = 8u - (xa & 7u);
+      unsigned nb = 8u - (xb & 7u);
+      if (n > nb) n = nb;
+      if (n > width - x) n = width - x;
+      uint16_t ae = vrword(v, abase + ((xa >> 3) << 1));
+      uint16_t be = vrword(v, bbase + ((xb >> 3) << 1));
+      const uint8_t apal = (uint8_t)(((ae >> 13) & 3u) << 4);
+      const uint8_t bpal = (uint8_t)(((be >> 13) & 3u) << 4);
+      const bool apri = (ae & 0x8000u) != 0;
+      const bool bpri = (be & 0x8000u) != 0;
+      const uint8_t *arow = g_cache_ready ? tile_row_cached(v, ae, ya) : NULL;
+      const uint8_t *brow = g_cache_ready ? tile_row_cached(v, be, yb) : NULL;
+      const unsigned ax = xa & 7u, bx = xb & 7u;
+      /* V0.35: make horizontal flip a span-level pointer direction,
+       * rather than two conditionals on every pixel.  Priority is also
+       * specialized per span; transparent high-priority tiles must still
+       * fall through to lower layers, exactly as in V0.34. */
+      const int astep = (ae & 0x0800u) ? -1 : 1;
+      const int bstep = (be & 0x0800u) ? -1 : 1;
+      const uint8_t *ap = arow ? arow + ((ae & 0x0800u) ? 7u-ax : ax) : NULL;
+      const uint8_t *bp = brow ? brow + ((be & 0x0800u) ? 7u-bx : bx) : NULL;
+      const uint8_t *sl = sprite_lo + x;
+      const uint8_t *sh = sprite_hi + x;
+      uint16_t *d = dst + x;
+      /* Keep the original uncached fallback, including its nibble
+       * extraction semantics, for low-memory configurations. */
+      if (!ap || !bp)
+        {
+          for (unsigned k = 0; k < n; ++k)
+            {
+              uint8_t ac = (uint8_t)(tile_pixel(v, ae, xa+k, ya) & 15u);
+              uint8_t bc = (uint8_t)(tile_pixel(v, be, xb+k, yb) & 15u);
+              uint8_t a = ac ? (uint8_t)(apal | ac) : 0;
+              uint8_t b = bc ? (uint8_t)(bpal | bc) : 0;
+              uint8_t slo = sl[k], shi = sh[k];
+              uint8_t color = shi ? shi :
+                              (a && apri) ? a :
+                              (b && bpri) ? b :
+                              slo ? slo : a ? a : b ? b : backdrop;
+              nz += color != 0u;
+              sp += slo != 0u || shi != 0u;
+              d[k] = (uint16_t)color * 0x0101u;
+            }
+        }
+      else
+        {
+          /* Four priority combinations. The compiler can eliminate all
+           * priority checks from the innermost pixel loop. */
+#define T2GEN_FUSED_SPAN(PRIORITY_EXPR) \
+          do { \
+            for (unsigned k = 0; k < n; ++k) { \
+              uint8_t ac = *ap, bc = *bp; \
+              uint8_t a = ac ? (uint8_t)(apal | ac) : 0u; \
+              uint8_t b = bc ? (uint8_t)(bpal | bc) : 0u; \
+              uint8_t slo = sl[k], shi = sh[k]; \
+              uint8_t color = shi ? shi : (PRIORITY_EXPR); \
+              nz += color != 0u; \
+              sp += (slo | shi) != 0u; \
+              d[k] = (uint16_t)color * 0x0101u; \
+              ap += astep; bp += bstep; \
+            } \
+          } while (0)
+          switch (((unsigned)apri << 1) | (unsigned)bpri)
+            {
+              case 0u:
+                T2GEN_FUSED_SPAN(slo ? slo : a ? a : b ? b : backdrop);
+                break;
+              case 1u:
+                T2GEN_FUSED_SPAN(b ? b : slo ? slo : a ? a : backdrop);
+                break;
+              case 2u:
+                T2GEN_FUSED_SPAN(a ? a : slo ? slo : b ? b : backdrop);
+                break;
+              default:
+                T2GEN_FUSED_SPAN(a ? a : b ? b : slo ? slo : backdrop);
+                break;
+            }
+#undef T2GEN_FUSED_SPAN
+        }
+      x += n;
+    }
+  *nonzero += nz;
+  *sprite_pixels += sp;
+}
+
 static void background_scanline(const struct t2gen_vdp_s *v,
                                 unsigned plane, unsigned y, unsigned width,
                                 unsigned cols, unsigned rows, int hs,
@@ -363,6 +588,11 @@ void t2gen_render_print_perf(void)
          (unsigned long long)(g_render_calls ? g_v18_dma_cache_us/g_render_calls : 0),
          (unsigned long long)(g_render_calls ? g_v18_dma_copy_us/g_render_calls : 0));
 
+  printf("T2GEN V0.30 TILE_CACHE: hits=%lu misses=%lu hit_pct=%lu reset_serial=%lu\n",
+         (unsigned long)g_tile_hits, (unsigned long)g_tile_misses,
+         (unsigned long)((g_tile_hits + g_tile_misses) ?
+                         (100ull * g_tile_hits / (g_tile_hits + g_tile_misses)) : 0),
+         (unsigned long)g_cache_reset_serial);
   printf("T2GEN V9.6 VIDEO PERF: renders=%lu compose_ms=%llu dma_ms=%llu dma_max_us=%lu dma_ok=%lu dma_fail=%lu cpu_fallback=%lu avg_compose_us=%llu avg_dma_us=%llu tile_misses=%lu tile_cache=%u\n",
          (unsigned long)g_render_calls,
          (unsigned long long)(g_compose_us/1000ull),
@@ -373,6 +603,213 @@ void t2gen_render_print_perf(void)
          (unsigned long long)(g_render_calls ? g_compose_us/g_render_calls : 0),
          (unsigned long long)(g_dma_ok ? g_transfer_us/g_dma_ok : 0),
          (unsigned long)g_tile_misses, (unsigned)g_cache_ready);
+}
+
+/* V0.36: diagnostic memory probes are executed ONLY after each 300-frame
+ * reporting window, never inside the per-pixel renderer. They intentionally
+ * use volatile accesses to measure the real memory region (not an optimized
+ * memset/memcpy), with matching 32-bit read/write traffic. DMA staging is
+ * scratch here: the previous transfer has completed, and the next render
+ * fully regenerates its active pixels before another DMA operation.
+ * Do not use these results as a cache-disabled or bus-saturation benchmark:
+ * they characterize the CPU's current cached access path. */
+static volatile uint32_t g_v036_probe_sink;
+static void t2gen_v036_memory_probe(void)
+{
+  enum { WORDS = 32768u, REPEATS = 8u };
+  if (!g_tile_cache)
+    return;
+  volatile const uint32_t *tile =
+      (volatile const uint32_t *)(const void *)g_tile_cache;
+  uint32_t sum = 0u;
+  uint64_t t0 = timestamp_us();
+  for (unsigned repeat = 0; repeat < REPEATS; ++repeat)
+    for (unsigned i = 0; i < WORDS; ++i)
+      sum += tile[i];
+  uint64_t tile_us = timestamp_us() - t0;
+  g_v036_probe_sink = sum;
+#ifdef CONFIG_STM32_DMA2D
+  if (g_dma_enabled && g_dma_lines)
+    {
+      volatile uint32_t *stage =
+          (volatile uint32_t *)(void *)g_dma_lines;
+      t0 = timestamp_us();
+      for (unsigned repeat = 0; repeat < REPEATS; ++repeat)
+        for (unsigned i = 0; i < WORDS; ++i)
+          stage[i] = (uint32_t)(i + repeat);
+      uint64_t write_us = timestamp_us() - t0;
+      t0 = timestamp_us();
+      for (unsigned repeat = 0; repeat < REPEATS; ++repeat)
+        for (unsigned i = 0; i < WORDS; ++i)
+          sum += stage[i];
+      uint64_t read_us = timestamp_us() - t0;
+      g_v036_probe_sink = sum;
+      printf("T2GEN V0.36 MEM: bytes_per_test=%lu tile_read_us=%llu "
+             "stage_write_us=%llu stage_read_us=%llu "
+             "tile_ptr=%p stage_ptr=%p checksum=%08lx\n",
+             (unsigned long)(WORDS * 4u * REPEATS),
+             (unsigned long long)tile_us,
+             (unsigned long long)write_us,
+             (unsigned long long)read_us,
+             (void *)g_tile_cache, (void *)g_dma_lines,
+             (unsigned long)g_v036_probe_sink);
+      return;
+    }
+#endif
+  printf("T2GEN V0.36 MEM: bytes_per_test=%lu tile_read_us=%llu "
+         "stage=unavailable tile_ptr=%p checksum=%08lx\n",
+         (unsigned long)(WORDS * 4u * REPEATS),
+         (unsigned long long)tile_us, (void *)g_tile_cache,
+         (unsigned long)g_v036_probe_sink);
+}
+
+/* V0.37: 8 KiB static internal-memory candidate.  Placement is determined
+ * by the board linker script; log the address rather than assuming DTCM.
+ * Run only between render windows; do not alter tile cache or VDP state.
+ * Each region uses exactly the same volatile access loops. */
+static uint32_t g_v037_sram_words[2048] __attribute__((aligned(32)));
+static volatile uint32_t g_v037_sink;
+
+#if defined(__arm__) || defined(__thumb__)
+static uint32_t t2gen_v037_cycles(void)
+{
+  return *(volatile uint32_t *)(uintptr_t)0xe0001004u;
+}
+static bool t2gen_v037_enable_cycles(void)
+{
+  volatile uint32_t *demcr = (volatile uint32_t *)(uintptr_t)0xe000edfc;
+  volatile uint32_t *ctrl = (volatile uint32_t *)(uintptr_t)0xe0001000;
+  *demcr |= (1u << 24);
+  *ctrl |= 1u;
+  return (*ctrl & 1u) != 0u;
+}
+#else
+static uint32_t t2gen_v037_cycles(void) { return 0u; }
+static bool t2gen_v037_enable_cycles(void) { return false; }
+#endif
+
+static void t2gen_v037_probe_region(const char *name,
+                                     volatile uint32_t *p,
+                                     bool can_write, bool cycles_ok)
+{
+  enum { N = 2048, REPEAT = 128 };
+  uint32_t sum = 0u;
+  uint32_t c0 = t2gen_v037_cycles();
+  uint64_t t0 = timestamp_us();
+  for (unsigned r = 0; r < REPEAT; ++r)
+    for (unsigned i = 0; i < N; ++i)
+      sum += p[i];
+  uint32_t seq_cycles = t2gen_v037_cycles() - c0;
+  uint64_t seq_us = timestamp_us() - t0;
+
+  /* Stride 16 words (64 bytes), wrapping through the same 8 KiB region.
+   * This approximates tile-row jumps and is deliberately not a DMA test. */
+  c0 = t2gen_v037_cycles();
+  t0 = timestamp_us();
+  for (unsigned r = 0; r < REPEAT; ++r)
+    for (unsigned i = 0; i < N; ++i)
+      sum += p[(i * 16u) & (N - 1u)];
+  uint32_t stride_cycles = t2gen_v037_cycles() - c0;
+  uint64_t stride_us = timestamp_us() - t0;
+
+  uint32_t write_cycles = 0u;
+  uint64_t write_us = 0u;
+  if (can_write)
+    {
+      c0 = t2gen_v037_cycles();
+      t0 = timestamp_us();
+      for (unsigned r = 0; r < REPEAT; ++r)
+        for (unsigned i = 0; i < N; ++i)
+          p[i] = (uint32_t)(i + r);
+      write_cycles = t2gen_v037_cycles() - c0;
+      write_us = timestamp_us() - t0;
+    }
+  g_v037_sink = sum;
+  printf("T2GEN V0.37 REGION: name=%s ptr=%p bytes=%u repeats=%u "
+         "seq_cycles=%lu seq_us=%llu stride_cycles=%lu stride_us=%llu "
+         "write_cycles=%lu write_us=%llu dwt=%u checksum=%08lx\n",
+         name, (void *)p, N * 4u, REPEAT,
+         (unsigned long)(cycles_ok ? seq_cycles : 0u),
+         (unsigned long long)seq_us,
+         (unsigned long)(cycles_ok ? stride_cycles : 0u),
+         (unsigned long long)stride_us,
+         (unsigned long)(cycles_ok ? write_cycles : 0u),
+         (unsigned long long)write_us,
+         (unsigned)cycles_ok, (unsigned long)g_v037_sink);
+}
+
+static void t2gen_v037_memory_probe(void)
+{
+  bool cycles_ok = t2gen_v037_enable_cycles();
+  for (unsigned i = 0; i < 2048u; ++i)
+    g_v037_sram_words[i] = i ^ 0x5a5a5a5au;
+  t2gen_v037_probe_region("static_sram", g_v037_sram_words, true, cycles_ok);
+  if (g_tile_cache)
+    t2gen_v037_probe_region("tile_cache",
+        (volatile uint32_t *)(void *)g_tile_cache, false, cycles_ok);
+#ifdef CONFIG_STM32_DMA2D
+  if (g_dma_enabled && g_dma_lines)
+    t2gen_v037_probe_region("stage_sdram",
+        (volatile uint32_t *)(void *)g_dma_lines, true, cycles_ok);
+#endif
+}
+
+/* V0.31: per-window stage deltas, printed during continuous gameplay.
+ * No extra timers inside scanline/pixel loops: reuse existing V18 counters.
+ * First call establishes a baseline; subsequent calls report exactly one
+ * 300-emulated-frame window (normally 100 displayed frames).
+ */
+void t2gen_render_print_window(uint64_t wall_us, uint64_t render_us)
+{
+  static uint64_t setup, sprites, bg, win, mix, cache, copy, compose, transfer;
+  static uint32_t hits, misses, dma_ok, dma_fail, fallback;
+  static unsigned renders;
+  uint64_t d_setup = g_v18_setup_us - setup;
+  uint64_t d_sprites = g_v18_sprite_us - sprites;
+  uint64_t d_bg = g_v18_bg_us - bg;
+  uint64_t d_win = g_v18_window_us - win;
+  uint64_t d_mix = g_v18_mix_us - mix;
+  uint64_t d_cache = g_v18_dma_cache_us - cache;
+  uint64_t d_copy = g_v18_dma_copy_us - copy;
+  uint64_t d_compose = g_compose_us - compose;
+  uint64_t d_transfer = g_transfer_us - transfer;
+  uint32_t d_hits = g_tile_hits - hits;
+  uint32_t d_misses = g_tile_misses - misses;
+  unsigned d_renders = g_render_calls - renders;
+  if (d_renders)
+    {
+      uint64_t measured = d_setup + d_sprites + d_bg + d_win + d_mix + d_cache + d_copy;
+      uint64_t other = render_us > measured ? render_us - measured : 0;
+      printf("T2GEN V0.31 WINDOW: renders=%u wall_ms=%llu render_ms=%llu cpu_other_ms=%llu "
+             "setup_ms=%llu sprites_ms=%llu background_ms=%llu window_ms=%llu "
+             "mix_scale_ms=%llu dma_cache_ms=%llu dma_copy_ms=%llu unaccounted_ms=%llu\n",
+             d_renders, (unsigned long long)(wall_us/1000u),
+             (unsigned long long)(render_us/1000u),
+             (unsigned long long)((wall_us > render_us ? wall_us-render_us : 0)/1000u),
+             (unsigned long long)(d_setup/1000u), (unsigned long long)(d_sprites/1000u),
+             (unsigned long long)(d_bg/1000u), (unsigned long long)(d_win/1000u),
+             (unsigned long long)(d_mix/1000u), (unsigned long long)(d_cache/1000u),
+             (unsigned long long)(d_copy/1000u), (unsigned long long)(other/1000u));
+      printf("T2GEN V0.31 AVG_US: background=%llu sprites=%llu mix_scale=%llu "
+             "dma_cache=%llu dma_copy=%llu render=%llu compose=%llu transfer=%llu\n",
+             (unsigned long long)(d_bg/d_renders), (unsigned long long)(d_sprites/d_renders),
+             (unsigned long long)(d_mix/d_renders), (unsigned long long)(d_cache/d_renders),
+             (unsigned long long)(d_copy/d_renders), (unsigned long long)(render_us/d_renders),
+             (unsigned long long)(d_compose/d_renders), (unsigned long long)(d_transfer/d_renders));
+      printf("T2GEN V0.31 CACHE_DMA: hits=%lu misses=%lu hit_pct=%lu "
+             "dma_ok=%lu dma_fail=%lu cpu_fallback=%lu\n",
+             (unsigned long)d_hits, (unsigned long)d_misses,
+             (unsigned long)((d_hits+d_misses) ? 100ull*d_hits/(d_hits+d_misses) : 0ull),
+             (unsigned long)(g_dma_ok-dma_ok), (unsigned long)(g_dma_fail-dma_fail),
+             (unsigned long)(g_cpu_fallback-fallback));
+      t2gen_v036_memory_probe();
+      t2gen_v037_memory_probe();
+    }
+  setup=g_v18_setup_us; sprites=g_v18_sprite_us; bg=g_v18_bg_us;
+  win=g_v18_window_us; mix=g_v18_mix_us; cache=g_v18_dma_cache_us;
+  copy=g_v18_dma_copy_us; compose=g_compose_us; transfer=g_transfer_us;
+  hits=g_tile_hits; misses=g_tile_misses; dma_ok=g_dma_ok;
+  dma_fail=g_dma_fail; fallback=g_cpu_fallback; renders=g_render_calls;
 }
 
 /* V21: fixed-VDP-state repeat benchmark. The CPU is NOT advanced between
@@ -578,10 +1015,10 @@ int t2gen_render_snapshot(const char *device)
       return -1;
     }
   uint64_t compose_start = timestamp_us();
-  tile_cache_begin();
+  tile_cache_begin(v);
   if (g_render_attempts <= 1u)
     printf("T2GEN V9.8.2: cache=%p ready=%u epoch=%u\n",
-           g_tile_cache, (unsigned)g_cache_ready, (unsigned)g_tile_epoch);
+           g_tile_cache, (unsigned)g_cache_ready, (unsigned)g_cache_reset_serial);
   /* H32/H40 mode transitions leave the former centered rectangle behind. */
   if (g_last_w && g_last_w!=src_w)
     {
@@ -637,13 +1074,49 @@ int t2gen_render_snapshot(const char *device)
 #ifdef CONFIG_STM32_DMA2D
       if (g_dma_enabled) r0 = g_dma_lines + y * 640u;
 #endif
+      /* V0.34: fuse both background planes with priority mixing and L8
+       * horizontal duplication. Window/column scroll and debug views use
+       * the exact V0.33 renderer below. DMA2D still doubles vertically. */
+      if (g_view == 0u && (v->reg[11] & 4u) == 0u)
+        {
+          unsigned hx = (v->reg[17] & 31u) * 16u;
+          unsigned vy = (v->reg[18] & 31u) * 8u;
+          bool full_win = (v->reg[18] & 0x80u) ? y >= vy : y < vy;
+          bool horizontal_win = (v->reg[17] & 0x80u) ? hx < src_w : hx != 0u;
+          if (!full_win && !horizontal_win)
+            {
+              uint16_t *dst = (uint16_t *)(void *)r0;
+              fused_scanline_fullscroll(v, y, src_w, cols, rows,
+                                        hs_a, hs_b, scroll_a[0], scroll_b[0],
+                                        sprite_lo, sprite_hi, dst,
+                                        &nonzero, &sprite_pixels);
+#ifdef CONFIG_STM32_DMA2D
+              if (!g_dma_enabled)
+#endif
+                memcpy(r1, r0, src_w * 2u);
+              g_v18_bg_us += timestamp_us() - v18_t;
+              continue;
+            }
+        }
       /* V12: compose pre-rasterized plane rows; no VRAM tile lookups in
        * the final per-pixel priority/sprite mixer. */
       uint16_t a_plane[320], b_plane[320];
-      background_scanline(v, 0u, y, src_w, cols, rows, hs_a,
-                          scroll_a, a_plane);
-      background_scanline(v, 1u, y, src_w, cols, rows, hs_b,
-                          scroll_b, b_plane);
+      /* V0.33: select the constant-Y fast path only when the VDP
+       * vertical column-scroll flag is clear. */
+      if ((v->reg[11] & 4u) == 0u)
+        {
+          background_scanline_fullscroll(v, 0u, y, src_w, cols, rows,
+                                         hs_a, scroll_a[0], a_plane);
+          background_scanline_fullscroll(v, 1u, y, src_w, cols, rows,
+                                         hs_b, scroll_b[0], b_plane);
+        }
+      else
+        {
+          background_scanline(v, 0u, y, src_w, cols, rows, hs_a,
+                              scroll_a, a_plane);
+          background_scanline(v, 1u, y, src_w, cols, rows, hs_b,
+                              scroll_b, b_plane);
+        }
       g_v18_bg_us += timestamp_us() - v18_t;
       v18_t = timestamp_us();
       /* V15: derive the enabled window region once per scanline, rather

@@ -107,7 +107,7 @@ int t2gen_main(int argc, char **argv)
 {
   if (argc < 2 || argc > 5)
     {
-      printf("Usage: t2gen ROM [ /dev/fb0 | none [ view:0-5 | bench_repeats:40-1000 [ bench_repeats:2-1000 ] ] ]\n");
+      printf("Usage: t2gen ROM [ /dev/fb0 | none [ play | view:0-5 | bench_repeats:40-1000 [ bench_repeats:2-1000 ] ] ]\n");
       return 1;
     }
   int fd = open(argv[1], O_RDONLY);
@@ -191,7 +191,18 @@ int t2gen_main(int argc, char **argv)
    * The five-argument form explicitly selects view and repeat count.
    */
   unsigned bench_repeats = 0;
-  if (argc >= 4)
+  bool gameplay = false;
+  if (argc >= 4 && strcmp(argv[3], "play") == 0)
+    {
+      if (argc != 4 || argc < 3 || strcmp(argv[2], "none") == 0)
+        {
+          printf("T2GEN V0.29: play requires a framebuffer: t2gen ROM /dev/fb0 play\n");
+          free(rom);
+          return 1;
+        }
+      gameplay = true;
+    }
+  if (argc >= 4 && !gameplay)
     {
       char *endptr = NULL;
       unsigned long arg = strtoul(argv[3], &endptr, 10);
@@ -235,11 +246,12 @@ int t2gen_main(int argc, char **argv)
     }
   printf("T2GEN V21.1: view/benchmark parsed; bench_repeats=%u\n",
          bench_repeats);
+  t2gen_musashi_set_gameplay(gameplay);
   t2gen_musashi_probe(rom, len, argc >= 3 ? argv[2] : NULL);
 #else
   t2gen_boot_probe(rom, len);
 #endif
-  if (argc >= 3 && strcmp(argv[2], "none") != 0)
+  if (!gameplay && argc >= 3 && strcmp(argv[2], "none") != 0)
     {
 #ifdef CONFIG_GAMES_T2GEN_MUSASHI
       t2gen_vdp_dump_write_diagnostics();

@@ -9,6 +9,13 @@
 #endif
 
 static struct t2gen_vdp_s g_vdp;
+static uint32_t g_tile_reset_serial;
+
+static inline void t2gen_vram_touch(uint16_t address)
+{
+  ++g_vdp.tile_version[address >> 5];
+}
+
 static t2gen_vdp_dma_read_t g_dma_reader;
 /* V8.2 diagnostics: bounded output, no changes to emulation behavior. */
 static uint32_t g_dbg_nonzero_vram;
@@ -91,6 +98,7 @@ static void dma_start(void)
       for (i = 0; i < n; i++)
         {
           g_vdp.vram[g_vdp.addr] = g_vdp.vram[(uint16_t)src];
+          t2gen_vram_touch(g_vdp.addr);
           src = (uint16_t)(src + 1);
           g_vdp.addr += g_vdp.reg[15];
         }
@@ -116,6 +124,8 @@ static void dma_start(void)
               case 1:
                 g_vdp.vram[addr] = word >> 8;
                 g_vdp.vram[(uint16_t)(addr + 1)] = word;
+                t2gen_vram_touch(addr);
+                t2gen_vram_touch((uint16_t)(addr + 1));
                 break;
               case 3:
                 g_vdp.cram[(addr >> 1) & 63] = word;
@@ -152,6 +162,7 @@ void t2gen_vdp_reset(void)
          (unsigned long)++g_dbg_reset_count, dbg_vram_nonzero(),
          dbg_cram_nonzero(), (unsigned long)g_vdp.data_writes);
   memset(&g_vdp, 0, sizeof(g_vdp));
+  g_vdp.tile_reset_serial = ++g_tile_reset_serial;
   g_vdp.reg[15] = 2;
   g_vdp.status = 0x3400;
 }
@@ -216,6 +227,7 @@ void t2gen_vdp_write_data(uint16_t value)
       /* Approximate MD DMA fill: first byte at address, then high byte
        * to successive VRAM locations. Not cycle-accurate. */
       g_vdp.vram[addr] = (uint8_t)value;
+      t2gen_vram_touch(addr);
       printf("T2GEN V8.4 DMA FILL execute length=%lu seed=%04X start=%04X inc=%u\n",
              (unsigned long)n, (unsigned)value, (unsigned)addr,
              (unsigned)g_vdp.reg[15]);
@@ -225,6 +237,7 @@ void t2gen_vdp_write_data(uint16_t value)
       for (i = 0; i < n; i++)
         {
           g_vdp.vram[(uint16_t)(g_vdp.addr + 1)] = value >> 8;
+          t2gen_vram_touch((uint16_t)(g_vdp.addr + 1));
           g_vdp.addr += g_vdp.reg[15];
         }
       g_vdp.dma_fill_pending = false;
@@ -247,6 +260,8 @@ void t2gen_vdp_write_data(uint16_t value)
           }
         g_vdp.vram[addr] = value >> 8;
         g_vdp.vram[(uint16_t)(addr + 1)] = value;
+        t2gen_vram_touch(addr);
+        t2gen_vram_touch((uint16_t)(addr + 1));
         break;
 
       case 0x03: /* CRAM write */

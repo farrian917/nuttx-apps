@@ -1055,6 +1055,12 @@ static void t2gen_v05_ram_words(uint32_t frame)
 }
 #endif
 
+static bool g_v029_gameplay;
+void t2gen_musashi_set_gameplay(int enabled)
+{
+  g_v029_gameplay = enabled != 0;
+}
+
 void t2gen_musashi_probe(const uint8_t *rom,size_t len, const char *fbdev) {
  /* V13: explicit CPU-only benchmark mode. No framebuffer opened. */
  if (fbdev != NULL && strcmp(fbdev, "none") == 0) fbdev = NULL;
@@ -1149,14 +1155,23 @@ m68k_pulse_reset();
  {
   const uint32_t cycles_per_line = 488u;
   const uint32_t lines_per_frame = 262u;
-  const uint32_t cycle_limit = 300000000u; /* approximately 469 NTSC frames */
-  uint32_t total_cycles = 0;
-  uint32_t next_line_cycle = cycles_per_line;
+  const uint64_t cycle_limit = g_v029_gameplay ? UINT64_MAX : 300000000ull;
+  if (g_v029_gameplay)
+    printf("T2GEN V0.32 PROFILE ACTIVE: first 300-frame window will report renderer stages; DMA2D build=%d\n",
+#ifdef CONFIG_STM32_DMA2D
+           1
+#else
+           0
+#endif
+           );
+  uint64_t total_cycles = 0;
+  uint64_t next_line_cycle = cycles_per_line;
   uint32_t line = 0;
   uint32_t last_pc = 0xffffffffu;
   uint32_t repeated_pc = 0;
   bool irq_asserted = false;
   unsigned slice = 0;
+  unsigned v029_exit_hold = 0;
   uint32_t rendered_frames = 0;
   uint32_t failed_frames = 0;
   uint64_t cpu_us=0, render_us=0;
@@ -1167,9 +1182,12 @@ m68k_pulse_reset();
   fps_start = wall_start;
   struct timeval t0,t1, cpu_t0;
   uint32_t render_max_us=0;
-  printf("T2GEN V9.2: execution_limit=%lu cycles line_cycles=%lu (~%lu frames)\n",
-         (unsigned long)cycle_limit, (unsigned long)cycles_per_line,
-         (unsigned long)(cycle_limit / (cycles_per_line * lines_per_frame)));
+  if (g_v029_gameplay)
+    printf("T2GEN V0.29 GAMEPLAY: framebuffer=%s, continuous execution, render every 3 frames; hold START+A+B+C for 2 seconds to quit\n", fbdev);
+  else
+    printf("T2GEN V9.2: execution_limit=%lu cycles line_cycles=%lu (~%lu frames)\n",
+           (unsigned long)cycle_limit, (unsigned long)cycles_per_line,
+           (unsigned long)(cycle_limit / (cycles_per_line * lines_per_frame)));
   t2gen_vdp_set_scanline(0);
   while (total_cycles < cycle_limit)
     {
@@ -1213,8 +1231,19 @@ m68k_pulse_reset();
               g_pad_frame++;
               fps_frames++;
               xbox_poll();
+              if (g_v029_gameplay)
+                {
+                  const uint8_t quit = PAD_START | PAD_A | PAD_B | PAD_C;
+                  if ((g_buttons & quit) == quit) ++v029_exit_hold;
+                  else v029_exit_hold = 0;
+                  if (v029_exit_hold >= 120u)
+                    {
+                      printf("T2GEN V0.29 GAMEPLAY: controller exit requested\n");
+                      goto v029_gameplay_done;
+                    }
+                }
 #ifdef CONFIG_GAMES_T2GEN_V04_SCRIPT_INPUT
-              g_buttons = t2gen_v04_script(g_pad_frame);
+              if (!g_v029_gameplay) g_buttons = t2gen_v04_script(g_pad_frame);
 #endif
 #ifdef CONFIG_GAMES_T2GEN_NATIVE_TRACE
               t2gen_native_trace_frame(g_pad_frame, total_cycles);
@@ -1250,6 +1279,8 @@ m68k_pulse_reset();
                          (unsigned long long)((render_us - fps_render_us_start) / 1000ull),
                          (unsigned long)(dt ? ((render_us - fps_render_us_start) * 100ull / dt) : 0ull),
                          fbdev ? "video" : "cpu-only");
+                  if (g_v029_gameplay && fbdev)
+                    t2gen_render_print_window(dt, render_us - fps_render_us_start);
                   fps_render_us_start = render_us;
                   fps_start = wall_now;
                   fps_renders = 0;
@@ -1413,6 +1444,7 @@ m68k_pulse_reset();
   gettimeofday(&wall_now, NULL);
   uint64_t wall_us = (uint64_t)((int64_t)(wall_now.tv_sec - wall_start.tv_sec) * 1000000ll +
                                 (int64_t)(wall_now.tv_usec - wall_start.tv_usec));
+v029_gameplay_done:
   printf("T2GEN V13 MODE: %s\n", fbdev ? "video" : "cpu-only");
   printf("T2GEN V9.9 TOTAL: wall_ms=%llu emulated_frames=%lu rendered=%lu emu_fps=%lu.%02lu display_fps=%lu.%02lu\n",
          (unsigned long long)(wall_us / 1000ull),

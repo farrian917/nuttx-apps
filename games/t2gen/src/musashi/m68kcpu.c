@@ -1291,6 +1291,340 @@ t2n_v018_next_instruction:
              * All other cases execute the original Musashi handler. */
             {
                 int native_done = 0;
+#ifdef T2GEN_V026_FAST_DISPATCH
+                /* Opcode-first fast path: avoid the PC switch for the two
+                 * fully decoded native opcode families. Do not alter the
+                 * instruction prologue/epilogue or trace/IRQ boundaries.
+                 * The legacy V0.24/V0.25 handlers are excluded when this
+                 * option is enabled to prevent duplicate dispatch. */
+#ifdef T2GEN_V025_NATIVE_MOVEQ
+                if ((REG_IR & 0xf100u) == 0x7000u)
+                {
+                    uint res = MAKE_INT_8(MASK_OUT_ABOVE_8(REG_IR));
+                    REG_D[(REG_IR >> 9) & 7u] = res;
+                    FLAG_N = NFLAG_32(res);
+                    FLAG_Z = res;
+                    FLAG_V = VFLAG_CLEAR;
+                    FLAG_C = CFLAG_CLEAR;
+                    g_t2gen_v025_moveq_count++;
+                    if (res & 0x80000000u) g_t2gen_v025_moveq_negative++;
+                    if (res == 0u) g_t2gen_v025_moveq_zero++;
+                    goto t2gen_v026_dispatch_done;
+                }
+#endif
+#ifdef T2GEN_V024_NATIVE_DBF
+                if ((REG_IR & 0xfff8u) == 0x51c8u)
+                {
+                    uint *r_dst = &REG_D[REG_IR & 7u];
+                    uint res = MASK_OUT_ABOVE_16(*r_dst - 1u);
+                    *r_dst = MASK_OUT_BELOW_16(*r_dst) | res;
+                    g_t2gen_v024_dbf_count++;
+                    if (res != 0xffffu)
+                    {
+                        uint offset = m68ki_read_imm_16();
+                        M68KI_REG_PC -= 2u;
+                        m68ki_trace_t0();
+                        m68ki_branch_16(offset);
+                        USE_CYCLES(CYC_DBCC_F_NOEXP);
+                        g_t2gen_v024_dbf_taken++;
+                    }
+                    else
+                    {
+                        M68KI_REG_PC += 2u;
+                        USE_CYCLES(CYC_DBCC_F_EXP);
+                        g_t2gen_v024_dbf_expired++;
+                    }
+                    goto t2gen_v026_dispatch_done;
+                }
+#endif
+#endif /* T2GEN_V026_FAST_DISPATCH */
+#ifndef T2GEN_V028_PC_HASH_DISPATCH
+#ifdef T2GEN_V027_FAST_POLL
+                /* ROM-PC-first dispatch for the seven busiest polling
+                 * instructions. Each opcode is fetched normally; bus reads,
+                 * CCR, trace, and the shared cycle epilogue are unchanged.
+                 * On opcode mismatch, defer to the existing switch. */
+                if (REG_PPC == 0x0000a12eu && REG_IR == 0xb279u)
+                {
+                    uint addr = m68ki_read_imm_32();
+                    if (addr == 0x00ff03b0u)
+                    {
+                        uint16_t w = (uint16_t)m68ki_read_16(addr);
+                        struct t2n_sync_result r = t2n_cmp_word(REG_D[1], w, m68ki_get_sr());
+                        m68ki_set_ccr(r.ccr);
+                        g_t2gen_v010_native_cmp_count++;
+                    }
+                    else
+                    {
+                        REG_IR = 0x4afcu;
+                        m68ki_instruction_jump_table[REG_IR]();
+                    }
+                    goto t2gen_v027_dispatch_done;
+                }
+                if (REG_PPC == 0x00006120u && REG_IR == 0xb079u)
+                {
+                    uint addr = m68ki_read_imm_32();
+                    if (addr == 0x00ff03b0u)
+                    {
+                        uint16_t w = (uint16_t)m68ki_read_16(addr);
+                        struct t2n_sync_result r = t2n_cmp_word(REG_D[0], w, m68ki_get_sr());
+                        m68ki_set_ccr(r.ccr);
+                        g_t2gen_v011_cmp_d0_count++;
+                    }
+                    else
+                    {
+                        REG_IR = 0x4afcu;
+                        m68ki_instruction_jump_table[REG_IR]();
+                    }
+                    goto t2gen_v027_dispatch_done;
+                }
+                if (REG_PPC == 0x0000a0e4u && REG_IR == 0x4a79u)
+                {
+                    uint addr = m68ki_read_imm_32();
+                    if (addr == 0x00ff0222u)
+                    {
+                        uint16_t w = (uint16_t)m68ki_read_16(addr);
+                        struct t2n_sync_result r = t2n_tst_word(w, m68ki_get_sr());
+                        m68ki_set_ccr(r.ccr);
+                        g_t2gen_v011_tst_count++;
+                    }
+                    else
+                    {
+                        REG_IR = 0x4afcu;
+                        m68ki_instruction_jump_table[REG_IR]();
+                    }
+                    goto t2gen_v027_dispatch_done;
+                }
+#ifdef T2GEN_V023_NATIVE_5670
+                if (REG_PPC == 0x00005670u && REG_IR == 0x4a79u)
+                {
+                    uint addr = m68ki_read_imm_32();
+                    if (addr == 0x00ff03b0u)
+                    {
+                        uint16_t w = (uint16_t)m68ki_read_16(addr);
+                        struct t2n_sync_result r = t2n_tst_word(w, m68ki_get_sr());
+                        m68ki_set_ccr(r.ccr);
+                        g_t2gen_v023_tst++;
+                    }
+                    else
+                    {
+                        REG_IR = 0x4afcu;
+                        m68ki_instruction_jump_table[REG_IR]();
+                        g_t2gen_v023_fallback[0]++;
+                    }
+                    goto t2gen_v027_dispatch_done;
+                }
+                if (REG_PPC == 0x00005676u && REG_IR == 0x67f8u)
+                {
+                    g_t2gen_v023_beq++;
+                    if (COND_EQ())
+                    {
+                        g_t2gen_v023_beq_taken++;
+                        m68ki_trace_t0();
+                        m68ki_branch_8(0xf8u);
+                    }
+                    else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    goto t2gen_v027_dispatch_done;
+                }
+#endif
+#ifdef T2GEN_V020_DIRECT_BRANCH
+                if (REG_PPC == 0x0000a134u && REG_IR == 0x67f8u)
+                {
+                    g_t2gen_v020_direct[0]++;
+                    g_t2gen_v012_branch_count[0]++;
+                    if (COND_EQ())
+                    {
+                        g_t2gen_v012_branch_taken[0]++;
+                        m68ki_trace_t0();
+                        m68ki_branch_8(0xf8u);
+                    }
+                    else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    goto t2gen_v027_dispatch_done;
+                }
+                if (REG_PPC == 0x00006126u && REG_IR == 0x67f8u)
+                {
+                    g_t2gen_v020_direct[1]++;
+                    g_t2gen_v012_branch_count[1]++;
+                    if (COND_EQ())
+                    {
+                        g_t2gen_v012_branch_taken[1]++;
+                        m68ki_trace_t0();
+                        m68ki_branch_8(0xf8u);
+                    }
+                    else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    goto t2gen_v027_dispatch_done;
+                }
+                if (REG_PPC == 0x0000a0eau && REG_IR == 0x66f8u)
+                {
+                    g_t2gen_v020_direct[2]++;
+                    g_t2gen_v012_branch_count[2]++;
+                    if (COND_NE())
+                    {
+                        g_t2gen_v012_branch_taken[2]++;
+                        m68ki_trace_t0();
+                        m68ki_branch_8(0xf8u);
+                    }
+                    else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    goto t2gen_v027_dispatch_done;
+                }
+#endif
+#endif /* T2GEN_V027_FAST_POLL */
+#else /* T2GEN_V028_PC_HASH_DISPATCH */
+#ifdef T2GEN_V027_FAST_POLL
+                /* ROM-PC-first dispatch for the seven busiest polling
+                 * instructions. Each opcode is fetched normally; bus reads,
+                 * CCR, trace, and the shared cycle epilogue are unchanged.
+                 * On opcode mismatch, defer to the existing switch. */
+                /* Eight collision-free low-five-bit slots for this ROM.
+                 * Always verify the full PC and opcode: other addresses
+                 * sharing a slot must use the original Musashi path. */
+                switch (REG_PPC & 31u)
+                {
+                case 0x0eu:
+                if (REG_PPC == 0x0000a12eu && REG_IR == 0xb279u)
+                {
+                    uint addr = m68ki_read_imm_32();
+                    if (addr == 0x00ff03b0u)
+                    {
+                        uint16_t w = (uint16_t)m68ki_read_16(addr);
+                        struct t2n_sync_result r = t2n_cmp_word(REG_D[1], w, m68ki_get_sr());
+                        m68ki_set_ccr(r.ccr);
+                        g_t2gen_v010_native_cmp_count++;
+                    }
+                    else
+                    {
+                        REG_IR = 0x4afcu;
+                        m68ki_instruction_jump_table[REG_IR]();
+                    }
+                    goto t2gen_v027_dispatch_done;
+                }
+                break;
+                case 0x00u:
+                if (REG_PPC == 0x00006120u && REG_IR == 0xb079u)
+                {
+                    uint addr = m68ki_read_imm_32();
+                    if (addr == 0x00ff03b0u)
+                    {
+                        uint16_t w = (uint16_t)m68ki_read_16(addr);
+                        struct t2n_sync_result r = t2n_cmp_word(REG_D[0], w, m68ki_get_sr());
+                        m68ki_set_ccr(r.ccr);
+                        g_t2gen_v011_cmp_d0_count++;
+                    }
+                    else
+                    {
+                        REG_IR = 0x4afcu;
+                        m68ki_instruction_jump_table[REG_IR]();
+                    }
+                    goto t2gen_v027_dispatch_done;
+                }
+                break;
+                case 0x04u:
+                if (REG_PPC == 0x0000a0e4u && REG_IR == 0x4a79u)
+                {
+                    uint addr = m68ki_read_imm_32();
+                    if (addr == 0x00ff0222u)
+                    {
+                        uint16_t w = (uint16_t)m68ki_read_16(addr);
+                        struct t2n_sync_result r = t2n_tst_word(w, m68ki_get_sr());
+                        m68ki_set_ccr(r.ccr);
+                        g_t2gen_v011_tst_count++;
+                    }
+                    else
+                    {
+                        REG_IR = 0x4afcu;
+                        m68ki_instruction_jump_table[REG_IR]();
+                    }
+                    goto t2gen_v027_dispatch_done;
+                }
+                break;
+#ifdef T2GEN_V023_NATIVE_5670
+                case 0x10u:
+                if (REG_PPC == 0x00005670u && REG_IR == 0x4a79u)
+                {
+                    uint addr = m68ki_read_imm_32();
+                    if (addr == 0x00ff03b0u)
+                    {
+                        uint16_t w = (uint16_t)m68ki_read_16(addr);
+                        struct t2n_sync_result r = t2n_tst_word(w, m68ki_get_sr());
+                        m68ki_set_ccr(r.ccr);
+                        g_t2gen_v023_tst++;
+                    }
+                    else
+                    {
+                        REG_IR = 0x4afcu;
+                        m68ki_instruction_jump_table[REG_IR]();
+                        g_t2gen_v023_fallback[0]++;
+                    }
+                    goto t2gen_v027_dispatch_done;
+                }
+                break;
+                case 0x16u:
+                if (REG_PPC == 0x00005676u && REG_IR == 0x67f8u)
+                {
+                    g_t2gen_v023_beq++;
+                    if (COND_EQ())
+                    {
+                        g_t2gen_v023_beq_taken++;
+                        m68ki_trace_t0();
+                        m68ki_branch_8(0xf8u);
+                    }
+                    else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    goto t2gen_v027_dispatch_done;
+                }
+                break;
+#endif
+#ifdef T2GEN_V020_DIRECT_BRANCH
+                case 0x14u:
+                if (REG_PPC == 0x0000a134u && REG_IR == 0x67f8u)
+                {
+                    g_t2gen_v020_direct[0]++;
+                    g_t2gen_v012_branch_count[0]++;
+                    if (COND_EQ())
+                    {
+                        g_t2gen_v012_branch_taken[0]++;
+                        m68ki_trace_t0();
+                        m68ki_branch_8(0xf8u);
+                    }
+                    else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    goto t2gen_v027_dispatch_done;
+                }
+                break;
+                case 0x06u:
+                if (REG_PPC == 0x00006126u && REG_IR == 0x67f8u)
+                {
+                    g_t2gen_v020_direct[1]++;
+                    g_t2gen_v012_branch_count[1]++;
+                    if (COND_EQ())
+                    {
+                        g_t2gen_v012_branch_taken[1]++;
+                        m68ki_trace_t0();
+                        m68ki_branch_8(0xf8u);
+                    }
+                    else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    goto t2gen_v027_dispatch_done;
+                }
+                break;
+                case 0x0au:
+                if (REG_PPC == 0x0000a0eau && REG_IR == 0x66f8u)
+                {
+                    g_t2gen_v020_direct[2]++;
+                    g_t2gen_v012_branch_count[2]++;
+                    if (COND_NE())
+                    {
+                        g_t2gen_v012_branch_taken[2]++;
+                        m68ki_trace_t0();
+                        m68ki_branch_8(0xf8u);
+                    }
+                    else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    goto t2gen_v027_dispatch_done;
+                }
+                break;
+#endif
+                default:
+                    break;
+                }
+#endif /* T2GEN_V027_FAST_POLL */
+#endif /* T2GEN_V028_PC_HASH_DISPATCH */
 #ifdef T2GEN_V019_PREDECODED_SYNC
                 /* ROM-specific predecoded branch entry points.  No
                  * speculative instruction execution: the opcode was just
@@ -1369,7 +1703,7 @@ t2n_v018_next_instruction:
                 }
                 if (!native_done)
 #endif
-#ifdef T2GEN_V025_NATIVE_MOVEQ
+#if defined(T2GEN_V025_NATIVE_MOVEQ) && !defined(T2GEN_V026_FAST_DISPATCH)
                 /* Opcode table mask matches Musashi's MOVEQ entry exactly.
                  * Do not touch X; preserve Musashi's internal Z convention
                  * (FLAG_Z holds the actual result, zero means Z set).
@@ -1389,7 +1723,7 @@ t2n_v018_next_instruction:
                 }
 #endif
                 if (!native_done)
-#ifdef T2GEN_V024_NATIVE_DBF
+#if defined(T2GEN_V024_NATIVE_DBF) && !defined(T2GEN_V026_FAST_DISPATCH)
                 /* DBF Dn,<disp16>: all eight D registers, original 68000
                  * semantics, no CCR modifications.  The extension word is
                  * fetched ONLY on the taken path, matching Musashi exactly.
@@ -1621,6 +1955,14 @@ t2n_v018_next_instruction:
                 }
                 if (!native_done)
                     m68ki_instruction_jump_table[REG_IR]();
+#ifdef T2GEN_V027_FAST_POLL
+            t2gen_v027_dispatch_done:
+                ; /* Shared original instruction epilogue. */
+#endif
+#ifdef T2GEN_V026_FAST_DISPATCH
+            t2gen_v026_dispatch_done:
+                ; /* Common outer epilogue charges original instruction cycles. */
+#endif
             }
 #else
 #if defined(T2GEN_V010_NATIVE_CMP_EXEC) || defined(T2GEN_V011_NATIVE_SYNC_EXEC)
