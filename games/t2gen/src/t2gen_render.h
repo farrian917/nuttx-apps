@@ -2,6 +2,7 @@
 #define T2GEN_RENDER_H
 void t2gen_render_set_view(unsigned view);
 int t2gen_render_snapshot(const char *device);
+int t2gen_render_benchmark(const char *device, unsigned repeats);
 #endif
 
 /* V9.6: per-stage rendering/DMA2D profiling */

@@ -375,6 +375,58 @@ void t2gen_render_print_perf(void)
          (unsigned long)g_tile_misses, (unsigned)g_cache_ready);
 }
 
+/* V21: fixed-VDP-state repeat benchmark. The CPU is NOT advanced between
+ * repetitions. This is deliberately separate from the gameplay FPS test.
+ * Warm-up render is excluded from measurements, and all stage counters are
+ * measured by differences to avoid contamination by the prior gameplay run.
+ */
+int t2gen_render_benchmark(const char *device, unsigned repeats)
+{
+  if (!device || strcmp(device, "none") == 0)
+    {
+      printf("T2GEN V21 BENCH: requires a framebuffer device\n");
+      return -1;
+    }
+  if (repeats < 2u || repeats > 1000u)
+    {
+      printf("T2GEN V21 BENCH: repeats must be 2..1000\n");
+      return -1;
+    }
+  if (t2gen_render_snapshot(device) < 0)
+    return -1;
+  const uint64_t b_bg = g_v18_bg_us;
+  const uint64_t b_mix = g_v18_mix_us;
+  const uint64_t b_spr = g_v18_sprite_us;
+  const uint64_t b_win = g_v18_window_us;
+  const uint64_t b_dma = g_v18_dma_copy_us;
+  const uint64_t b_comp = g_compose_us;
+  const uint32_t b_miss = g_tile_misses;
+  const uint32_t b_fail = g_dma_fail;
+  const uint64_t begin = timestamp_us();
+  for (unsigned i = 0; i < repeats; ++i)
+    if (t2gen_render_snapshot(device) < 0)
+      {
+        printf("T2GEN V21 BENCH: failed at repeat=%u\n", i);
+        return -1;
+      }
+  const uint64_t wall = timestamp_us() - begin;
+  printf("T2GEN V21 FIXED: repeats=%u wall_us=%llu avg_wall_us=%llu "
+         "background_us=%llu mix_scale_us=%llu sprites_us=%llu "
+         "window_us=%llu dma_copy_us=%llu compose_us=%llu "
+         "tile_misses=%lu dma_fail=%lu\n",
+         repeats, (unsigned long long)wall,
+         (unsigned long long)(wall / repeats),
+         (unsigned long long)((g_v18_bg_us - b_bg) / repeats),
+         (unsigned long long)((g_v18_mix_us - b_mix) / repeats),
+         (unsigned long long)((g_v18_sprite_us - b_spr) / repeats),
+         (unsigned long long)((g_v18_window_us - b_win) / repeats),
+         (unsigned long long)((g_v18_dma_copy_us - b_dma) / repeats),
+         (unsigned long long)((g_compose_us - b_comp) / repeats),
+         (unsigned long)(g_tile_misses - b_miss),
+         (unsigned long)(g_dma_fail - b_fail));
+  return 0;
+}
+
 static uint16_t g_last_cram[64];
 static bool g_palette_valid;
 static uint8_t g_red[64], g_green[64], g_blue[64];

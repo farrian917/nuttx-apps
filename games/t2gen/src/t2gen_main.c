@@ -105,9 +105,9 @@ static int display_probe(const char *path)
 }
 int t2gen_main(int argc, char **argv)
 {
-  if (argc < 2 || argc > 4)
+  if (argc < 2 || argc > 5)
     {
-      printf("Usage: t2gen /mnt/t2.gen [ /dev/fb0 | none [ view:0-3 ] ]\n");
+      printf("Usage: t2gen ROM [ /dev/fb0 | none [ view:0-5 | bench_repeats:40-1000 [ bench_repeats:2-1000 ] ] ]\n");
       return 1;
     }
   int fd = open(argv[1], O_RDONLY);
@@ -186,17 +186,68 @@ int t2gen_main(int argc, char **argv)
          ((sum & 0xffffu) == be16(rom + 0x18e)) ? "MATCH" : "MISMATCH");
   printf("T2GEN: ROM probe OK\n");
 #ifdef CONFIG_GAMES_T2GEN_MUSASHI
-  if (argc == 4) t2gen_render_set_view((unsigned)atoi(argv[3]));
+  /* V21.1: four-argument shorthand uses 6..1000 for benchmark repeats.
+   * Values 0..5 remain the historical rendering view selection.
+   * The five-argument form explicitly selects view and repeat count.
+   */
+  unsigned bench_repeats = 0;
+  if (argc >= 4)
+    {
+      char *endptr = NULL;
+      unsigned long arg = strtoul(argv[3], &endptr, 10);
+      if (!argv[3][0] || !endptr || *endptr != '\0' ||
+          arg > 1000ul)
+        {
+          printf("T2GEN V21.1: invalid view/repeats argument\n");
+          free(rom);
+          return 1;
+        }
+      if (argc == 4 && arg >= 6ul)
+        {
+          bench_repeats = (unsigned)arg;
+          if (bench_repeats < 2u)
+            {
+              free(rom);
+              return 1;
+            }
+        }
+      else if (arg <= 5ul)
+        t2gen_render_set_view((unsigned)arg);
+      else
+        {
+          printf("T2GEN V21.1: view must be 0..5\n");
+          free(rom);
+          return 1;
+        }
+    }
+  if (argc == 5)
+    {
+      char *endptr = NULL;
+      unsigned long repeats = strtoul(argv[4], &endptr, 10);
+      if (!argv[4][0] || !endptr || *endptr != '\0' ||
+          repeats < 2ul || repeats > 1000ul)
+        {
+          printf("T2GEN V21.1: bench_repeats must be 2..1000\n");
+          free(rom);
+          return 1;
+        }
+      bench_repeats = (unsigned)repeats;
+    }
+  printf("T2GEN V21.1: view/benchmark parsed; bench_repeats=%u\n",
+         bench_repeats);
   t2gen_musashi_probe(rom, len, argc >= 3 ? argv[2] : NULL);
 #else
   t2gen_boot_probe(rom, len);
 #endif
-  if (argc >= 3)
+  if (argc >= 3 && strcmp(argv[2], "none") != 0)
     {
 #ifdef CONFIG_GAMES_T2GEN_MUSASHI
       t2gen_vdp_dump_write_diagnostics();
   t2gen_vdp_dump_memory();
-      t2gen_render_snapshot(argv[2]);
+      if (t2gen_render_snapshot(argv[2]) < 0)
+        printf("T2GEN V21: final snapshot render failed\n");
+      if (bench_repeats != 0u)
+        t2gen_render_benchmark(argv[2], bench_repeats);
 #else
       display_probe(argv[2]);
 #endif

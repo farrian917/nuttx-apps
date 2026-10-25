@@ -24,3 +24,229 @@ config GAMES_T2GEN_MUSASHI
     help
       Enable only after copying Musashi m68kcpu.c, m68kops.c and headers
       into src/musashi/. This is a CPU/bus diagnostic, not a playable game.
+
+config GAMES_T2GEN_NATIVE_TRACE
+    bool "Emit reference game-state trace for T2NATIVE port"
+    default n
+    depends on GAMES_T2GEN_MUSASHI
+    help
+      Emit CPU registers, RAM hash, controller state and VDP write counter
+      at frame boundaries for comparison with a future native game port.
+      Adds RAM hashing and serial I/O overhead; disable for FPS benchmarks.
+
+config GAMES_T2GEN_NATIVE_TRACE_STRIDE
+    int "Reference trace frame interval"
+    default 60
+    range 1 2346
+    depends on GAMES_T2GEN_NATIVE_TRACE
+    help
+      1 captures every frame; 60 reduces serial overhead.
+
+config GAMES_T2GEN_V04_RAM_DIFF
+    bool "V0.4 log first 16 changed RAM bytes per interval"
+    default n
+    depends on GAMES_T2GEN_MUSASHI
+
+config GAMES_T2GEN_V04_PC_PROFILE
+    bool "V0.4 sample selected PCs at 488-cycle slice boundaries"
+    default n
+    depends on GAMES_T2GEN_MUSASHI
+
+config GAMES_T2GEN_V04_SCRIPT_INPUT
+    bool "V0.4 deterministic controller input script (overrides Xbox)"
+    default n
+    depends on GAMES_T2GEN_MUSASHI
+
+config GAMES_T2GEN_V04_INTERVAL
+    int "V0.4 RAM/PC report interval (frames)"
+    default 60
+    range 1 2346
+    depends on GAMES_T2GEN_V04_RAM_DIFF || GAMES_T2GEN_V04_PC_PROFILE
+
+config GAMES_T2GEN_V05_TARGET_TRACE
+    bool "V0.5 capture first 32 target instruction executions and total counts"
+    default n
+    depends on GAMES_T2GEN_MUSASHI
+    help
+      Install Musashi's per-instruction hook and capture up to 32 early
+      target instruction states; count all target executions. Slows CPU.
+
+config GAMES_T2GEN_V05_RAM_WORDS
+    bool "V0.5 log candidate RAM words at fixed frame intervals"
+    default n
+    depends on GAMES_T2GEN_MUSASHI
+
+config GAMES_T2GEN_V05_INTERVAL
+    int "V0.5 RAM word report interval in frames"
+    default 60
+    range 1 2346
+    depends on GAMES_T2GEN_V05_RAM_WORDS
+
+config GAMES_T2GEN_V06_FLOW_TRACE
+    bool "V0.6 trace target instruction entries and exits"
+    default n
+    depends on GAMES_T2GEN_MUSASHI
+    help
+      Enables Musashi instruction hook, recording bounded transition
+      snapshots for six target addresses across three frame phases.
+      No serial I/O occurs inside the instruction callback.
+      Can be used alongside V0.5 counters. Clean rebuild required.
+
+config GAMES_T2GEN_V07_EPISODES
+    bool "V0.7 trace completed original ROM polling-loop episodes"
+    default n
+    depends on GAMES_T2GEN_MUSASHI
+    help
+      Records entry and RTS completion of three ROM polling loops.
+      Captures up to 12 completed episodes per loop per phase.
+      V0.7 supersedes V0.6 flow capture when both are selected.
+      Requires clean Musashi rebuild.
+
+config GAMES_T2GEN_V08_NATIVE_SYNC_CHECK
+    bool "V0.8.1 native C synchronization comparison versus Musashi"
+    default n
+    depends on GAMES_T2GEN_MUSASHI && GAMES_T2GEN_V07_EPISODES
+    help
+      Runs native C CMP.W/TST.W flag and branch calculations alongside
+      Musashi, without replacing original ROM execution or timing.
+      Requires a clean rebuild of Musashi with instruction hooks.
+
+config GAMES_T2GEN_V010_NATIVE_CMP_EXEC
+    bool "V0.10 EXPERIMENT: native CMP.W at ROM A12E inside Musashi dispatch"
+    default n
+    depends on GAMES_T2GEN_MUSASHI
+    help
+      Replaces only the CMP.W instruction at 0xA12E with native C.
+      Branch, interrupts, remaining game code still run in Musashi.
+      Keep disabled for the reference build; compare reference frame hashes.
+
+config GAMES_T2GEN_V011_NATIVE_SYNC_EXEC
+    bool "V0.11 EXPERIMENT: native CMP.W D0 and TST.W synchronization"
+    default n
+    depends on GAMES_T2GEN_V010_NATIVE_CMP_EXEC
+    help
+      Additionally executes ROM 0x6120 CMP.W D0 and 0xA0E4 TST.W
+      using native C within Musashi's dispatch. Branches and IRQs
+      remain emulated. Compare reference frame fingerprints.
+
+config GAMES_T2GEN_V012_NATIVE_BRANCH_EXEC
+    bool "V0.12 EXPERIMENT: native BEQ/BNE synchronization branches"
+    default n
+    depends on GAMES_T2GEN_V011_NATIVE_SYNC_EXEC
+    help
+      Execute three exact ROM conditional branches (A134, 6126, A0EA)
+      in native C within Musashi's dispatch. Retain instruction cycle
+      accounting and interrupt boundaries. Disable for reference runs.
+
+config GAMES_T2GEN_V015_PAIRED_SYNC
+    bool "V0.15 EXPERIMENT: pair native sync compare/test and branch"
+    default n
+    depends on GAMES_T2GEN_V012_NATIVE_BRANCH_EXEC
+    help
+      Execute the next BEQ/BNE in the same dispatch iteration after
+      a recognized CMP/TST, only if cycles remain. Preserve per-instruction
+      fetch, PPC, register snapshot, cycle debit and trace boundaries.
+      Experimental: verify using the V0.14 reference comparator.
+
+config GAMES_T2GEN_V016_SWITCH_DISPATCH
+    bool "V0.16 EXPERIMENT: single-switch native instruction dispatch"
+    default n
+    depends on GAMES_T2GEN_V012_NATIVE_BRANCH_EXEC
+    help
+      Replace the repeated address/opcode condition chain with one
+      switch on previous PC. Original Musashi fallback is preserved.
+      Compare against the V0.14 reference trace before relying on it.
+
+config GAMES_T2GEN_V017_NATIVE_SYNC_RTS
+    bool "V0.17 EXPERIMENT: native RTS for three synchronization routines"
+    default n
+    depends on GAMES_T2GEN_V016_SWITCH_DISPATCH
+    help
+      Translate the RTS at ROM A136, 6128 and A0EC to native C.
+      These are the third instructions in the original polling routines.
+      Preserve the Musashi stack read, T0 trace, PC jump and cycle debit.
+      All polling iterations and interrupt boundaries remain unchanged.
+      Compare all 39 checkpoints against the Musashi-only reference.
+
+config GAMES_T2GEN_V018_ROUTINE_DISPATCH
+    bool "V0.18 EXPERIMENT: native routine continuation dispatch"
+    default n
+    depends on GAMES_T2GEN_V017_NATIVE_SYNC_RTS
+    depends on !GAMES_T2GEN_V015_PAIRED_SYNC
+    help
+      Continue at native branch and RTS sites inside the same CPU slice,
+      bypassing the outer dispatch loop edge and PPC switch for recognized
+      follow-up instructions. Every instruction still has the normal fetch,
+      register snapshot, trace handling and cycle debit. No iterations are
+      skipped. Compare all checkpoints against Musashi-only reference.
+
+config GAMES_T2GEN_V019_PREDECODED_SYNC
+    bool "V0.19 predecoded native branch fast path"
+    default n
+    depends on GAMES_T2GEN_V016_SWITCH_DISPATCH && GAMES_T2GEN_V012_NATIVE_BRANCH_EXEC
+    help
+      Use ROM-address predecoded branch entry points with runtime opcode
+      validation. Preserve Musashi's normal per-instruction timing, trace,
+      fetch and interrupt boundaries. Disable V0.18 for A/B benchmarking.
+
+config GAMES_T2GEN_V020_DIRECT_BRANCH
+    bool "V0.20 direct per-site native branch dispatch"
+    default n
+    depends on GAMES_T2GEN_V016_SWITCH_DISPATCH && GAMES_T2GEN_V012_NATIVE_BRANCH_EXEC
+    depends on !GAMES_T2GEN_V019_PREDECODED_SYNC && !GAMES_T2GEN_V018_ROUTINE_DISPATCH
+    depends on !GAMES_T2GEN_V015_PAIRED_SYNC
+    help
+      Dispatch the three hot ROM branch sites with direct, site-specific
+      handlers inside the existing PPC switch. Avoid V0.19's extra PPC
+      classification and the generic three-way branch handler. All original
+      instruction prologue, opcode validation, cycle and trace handling
+      remain. Musashi handles opcode mismatches.
+
+config GAMES_T2GEN_V021_OPCODE_PROFILE
+    bool "V0.21 instruction opcode frequency profiler (slow diagnostic)"
+    default n
+    help
+      Count every fetched 68000 opcode in a 2048-entry fixed-size histogram
+      (16 KiB RAM), including native and Musashi instructions. Print the
+      24 most frequent opcodes and 16 opcode groups at benchmark end.
+      Profiling adds significant runtime overhead; disable for FPS tests.
+
+config GAMES_T2GEN_V022_PC_PROFILE
+    bool "V0.22 selected opcode PC-address frequency profiler (slow diagnostic)"
+    default n
+    help
+      Count exact instruction addresses for opcodes 4A79, 67F8, 51C8 and
+      51CF in a fixed 4096-entry table (about 48 KiB on 32-bit targets).
+      Prints top 32 addresses at benchmark end. Adds execution overhead.
+
+config GAMES_T2GEN_V023_NATIVE_5670
+    bool "V0.23 native original TST/BEQ synchronization at 0x5670"
+    default n
+    depends on GAMES_T2GEN_V016_SWITCH_DISPATCH && GAMES_T2GEN_V011_NATIVE_SYNC_EXEC
+    depends on !GAMES_T2GEN_V018_ROUTINE_DISPATCH && !GAMES_T2GEN_V019_PREDECODED_SYNC
+    help
+      Translate ROM TST.W ($00FF03B0).L at 0x5670 and BEQ.S -8
+      at 0x5676. Validate actual opcode and extension address. Preserve
+      individual instruction boundaries, memory reads, flags, and cycles.
+
+config GAMES_T2GEN_V024_NATIVE_DBF
+    bool "V0.24 native 68000 DBF/DBRA instruction (0x51C8..0x51CF)"
+    default n
+    depends on GAMES_T2GEN_MUSASHI && GAMES_T2GEN_V016_SWITCH_DISPATCH
+    help
+      Replace Musashi's DBF D0..D7 handler with equivalent native C.
+      Preserve 16-bit decrement and wrap, upper data register word,
+      original extension-word fetch timing, trace, branch, and cycles.
+      Prints executed/taken/expired counters independently of V0.8.
+      For performance measurements disable V0.21 and V0.22 profilers.
+
+config GAMES_T2GEN_V025_NATIVE_MOVEQ
+    bool "V0.25 native MOVEQ D0..D7 immediate instruction"
+    default n
+    depends on GAMES_T2GEN_MUSASHI && GAMES_T2GEN_V016_SWITCH_DISPATCH
+    help
+      Native implementation of all MOVEQ opcodes using the same opcode
+      mask and flag representation as Musashi. Preserves X, modifies N/Z/V/C,
+      keeps one-instruction trace, interrupt and cycle boundaries.
+      Independent end-of-benchmark counters; disable V0.21/V0.22
+      profiling for performance comparisons.

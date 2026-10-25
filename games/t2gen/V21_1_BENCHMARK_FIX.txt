@@ -1,0 +1,11 @@
+T2GEN V21.1: Fixed command-line benchmark argument parsing.
+
+Commands:
+  t2gen /mnt/t2.gen /dev/fb0 40     (40 fixed-snapshot repetitions)
+  t2gen /mnt/t2.gen /dev/fb0 0 40   (explicit view=0, 40 repetitions)
+  t2gen /mnt/t2.gen /dev/fb0 0      (normal view 0)
+
+Four-argument values 0..5 select view; 6..1000 select benchmark repeats.
+Five-argument form allows 2..1000 repeats.
+
+The fixed-snapshot benchmark still runs after the 300-million-cycle emulation.
