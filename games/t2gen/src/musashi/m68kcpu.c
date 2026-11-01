@@ -62,6 +62,36 @@ unsigned long t2gen_v016_paired_count(unsigned int i)
 unsigned long t2gen_v016_paired_fallback(unsigned int i)
 { return i < 3 ? g_t2gen_v016_paired_fallback[i] : 0; }
 #endif
+#ifdef T2GEN_V042_PAIR_PROFILE
+/* Diagnostic-only counters. CYCCNT is read only when already enabled by
+ * the board; this feature never changes the system debug configuration. */
+static unsigned long g_v042_pairs, g_v042_taken, g_v042_not_taken;
+static unsigned long g_v042_fallback, g_v042_no_cycle_counter;
+static uint64_t g_v042_cycles;
+static inline uint32_t v042_cycle_now(void)
+{
+#if defined(__arm__) || defined(__thumb__)
+  return *(volatile const uint32_t *)0xe0001004u;
+#else
+  return 0;
+#endif
+}
+static inline int v042_cycle_enabled(void)
+{
+#if defined(__arm__) || defined(__thumb__)
+  return ((*(volatile const uint32_t *)0xe000edfcU & (1u << 24)) != 0u) &&
+         ((*(volatile const uint32_t *)0xe0001000U & 1u) != 0u);
+#else
+  return 0;
+#endif
+}
+unsigned long t2gen_v042_pairs(void) { return g_v042_pairs; }
+unsigned long t2gen_v042_taken(void) { return g_v042_taken; }
+unsigned long t2gen_v042_not_taken(void) { return g_v042_not_taken; }
+unsigned long t2gen_v042_fallback(void) { return g_v042_fallback; }
+unsigned long t2gen_v042_no_counter(void) { return g_v042_no_cycle_counter; }
+uint64_t t2gen_v042_cycles(void) { return g_v042_cycles; }
+#endif
 #ifdef T2GEN_V018_ROUTINE_DISPATCH
 static unsigned long g_t2gen_v018_followup[3];
 static unsigned long g_t2gen_v018_exit[3];
@@ -1222,6 +1252,213 @@ unsigned int t2gen_v022_top(unsigned int rank, unsigned long *pc,
 }
 #endif /* T2GEN_V022_PC_PROFILE */
 
+/* V0.38.7: sampled instruction hotspots. No heap, no bus reads,
+ * no changes to emulated state. Every 128th fetched instruction is sampled.
+ * The 128-slot table uses bounded linear search on sampled events only.
+ * When full, unknown PCs are counted as dropped (no false attribution).
+ * Counters reset after each 300-frame report; FPS includes sampling cost.
+ */
+#define T2GEN_V0387_SAMPLE_SHIFT 7u
+#define T2GEN_V0387_PC_SLOTS 128u
+struct t2gen_v0387_pc_s { unsigned long pc; unsigned long count; unsigned short opcode; };
+static struct t2gen_v0387_pc_s g_t2gen_v0387_pcs[T2GEN_V0387_PC_SLOTS];
+static unsigned long g_t2gen_v0387_groups[16];
+static unsigned long g_t2gen_v0387_seen, g_t2gen_v0387_samples;
+static unsigned long g_t2gen_v0387_dropped;
+static void t2gen_v0387_sample(unsigned long pc, unsigned int opcode)
+{
+#ifndef T2GEN_V0389_DIAGNOSTIC_PROFILING
+    (void)pc; (void)opcode; return;
+#else
+    unsigned int i;
+    if ((++g_t2gen_v0387_seen & ((1u << T2GEN_V0387_SAMPLE_SHIFT)-1u)) != 0u) return;
+    ++g_t2gen_v0387_samples;
+    ++g_t2gen_v0387_groups[(opcode >> 12) & 15u];
+    for (i=0; i<T2GEN_V0387_PC_SLOTS; ++i)
+    {
+        if (g_t2gen_v0387_pcs[i].count && g_t2gen_v0387_pcs[i].pc == pc)
+        { ++g_t2gen_v0387_pcs[i].count; return; }
+    }
+    for (i=0; i<T2GEN_V0387_PC_SLOTS; ++i)
+    {
+        if (!g_t2gen_v0387_pcs[i].count)
+        { g_t2gen_v0387_pcs[i].pc=pc; g_t2gen_v0387_pcs[i].opcode=(unsigned short)opcode;
+          g_t2gen_v0387_pcs[i].count=1; return; }
+    }
+    ++g_t2gen_v0387_dropped;
+#endif /* T2GEN_V0389_DIAGNOSTIC_PROFILING */
+}
+void t2gen_v0387_report(unsigned long frame)
+{
+#ifndef T2GEN_V0389_DIAGNOSTIC_PROFILING
+    (void)frame; return;
+#else
+    unsigned int rank,i,best_i,group;
+    unsigned long best;
+    printf("T2GEN V0.38.7 CPU_SAMPLE: frame=%lu shift=%u fetched=%lu samples=%lu dropped=%lu\n",
+           frame,(unsigned)T2GEN_V0387_SAMPLE_SHIFT,g_t2gen_v0387_seen,
+           g_t2gen_v0387_samples,g_t2gen_v0387_dropped);
+    for (group=0; group<16; ++group)
+        if (g_t2gen_v0387_groups[group])
+            printf("T2GEN V0.38.7 GROUP: high_nibble=%X samples=%lu\n",group,g_t2gen_v0387_groups[group]);
+    for (rank=0; rank<16; ++rank)
+    {
+        best=0; best_i=T2GEN_V0387_PC_SLOTS;
+        for (i=0; i<T2GEN_V0387_PC_SLOTS; ++i)
+            if (g_t2gen_v0387_pcs[i].count>best)
+            {best=g_t2gen_v0387_pcs[i].count;best_i=i;}
+        if (best_i==T2GEN_V0387_PC_SLOTS) break;
+        printf("T2GEN V0.38.7 HOT_PC: rank=%u pc=%06lx opcode=%04x samples=%lu\n",
+               rank+1,g_t2gen_v0387_pcs[best_i].pc,
+               (unsigned)g_t2gen_v0387_pcs[best_i].opcode,best);
+        g_t2gen_v0387_pcs[best_i].count=0;
+    }
+    /* Reset after printing; each window is independent. */
+    memset(g_t2gen_v0387_pcs,0,sizeof(g_t2gen_v0387_pcs));
+    memset(g_t2gen_v0387_groups,0,sizeof(g_t2gen_v0387_groups));
+    g_t2gen_v0387_seen=g_t2gen_v0387_samples=g_t2gen_v0387_dropped=0;
+#endif /* T2GEN_V0389_DIAGNOSTIC_PROFILING */
+}
+
+/* V0.38.8: exact native utilization of the eight dominant polling PCs.
+ * This is diagnostic-only: no emulated registers, memory, flags, or cycles
+ * are changed. The native marker is set only after an exact PC/opcode match.
+ * The common dispatch epilogue counts a fallback if no marker was set.
+ * Counted instructions include all executions, not sampled estimates.
+ */
+static const uint32_t g_t2gen_v0388_hot_pc[8] = {
+    0x0000a12eu, 0x0000a134u, 0x0000a0e4u, 0x0000a0eau,
+    0x00006120u, 0x00006126u, 0x00005670u, 0x00005676u
+};
+static uint32_t g_t2gen_v0388_native[8], g_t2gen_v0388_fallback[8];
+static unsigned int t2gen_v0388_slot(uint32_t pc)
+{
+    unsigned int i;
+    for (i=0; i<8u; ++i) if (g_t2gen_v0388_hot_pc[i]==pc) return i;
+    return 8u;
+}
+static void t2gen_v0388_count(uint32_t pc, int native)
+{
+#ifndef T2GEN_V0389_DIAGNOSTIC_PROFILING
+    (void)pc; (void)native; return;
+#else
+    unsigned int i=t2gen_v0388_slot(pc);
+    if (i<8u) {
+        if (native) ++g_t2gen_v0388_native[i];
+        else ++g_t2gen_v0388_fallback[i];
+    }
+#endif /* T2GEN_V0389_DIAGNOSTIC_PROFILING */
+}
+void t2gen_v0388_report(unsigned long frame)
+{
+#ifndef T2GEN_V0389_DIAGNOSTIC_PROFILING
+    (void)frame; return;
+#else
+    unsigned int i;
+    for (i=0; i<8u; ++i) {
+        uint32_t n=g_t2gen_v0388_native[i], f=g_t2gen_v0388_fallback[i];
+        printf("T2GEN V0.38.8 HOT_PATH: frame=%lu pc=%06lx native=%lu musashi=%lu native_pct=%lu\n",
+            frame, (unsigned long)g_t2gen_v0388_hot_pc[i],
+            (unsigned long)n,(unsigned long)f,
+            (unsigned long)((uint64_t)n*100u/(n+f ? (uint64_t)n+f : 1u)));
+        g_t2gen_v0388_native[i]=g_t2gen_v0388_fallback[i]=0;
+    }
+#endif /* T2GEN_V0389_DIAGNOSTIC_PROFILING */
+}
+
+/* V0.38.4: opcode-handler pointer guard and table integrity diagnostic.
+ * This diagnostic intentionally costs extra CPU time. Do not use its FPS as
+ * a performance comparison. Only Flash Thumb handlers are expected here.
+ */
+static uint32_t t2gen_v0384_table_hash(void)
+{
+    uint32_t h = 2166136261u;
+    unsigned int i;
+    if (!m68ki_instruction_jump_table) return 0;
+    for (i = 0; i < 65536u; ++i)
+    {
+        uintptr_t p = (uintptr_t)m68ki_instruction_jump_table[i];
+        h = (h ^ (uint32_t)p) * 16777619u;
+    }
+    return h;
+}
+static uint32_t g_t2gen_v0384_original_hash;
+static uintptr_t *g_t2gen_v0384_original;
+static int g_t2gen_v0384_snapshot_ready;
+void t2gen_v0384_table_snapshot(void)
+{
+    unsigned int i;
+    if (!m68ki_instruction_jump_table) return;
+    /* Allocate 512 KiB to force SDRAM region selection on this board. */
+    g_t2gen_v0384_original = (uintptr_t *)malloc(512u * 1024u);
+    if (g_t2gen_v0384_original &&
+        !((uintptr_t)g_t2gen_v0384_original >= 0xC0000000u &&
+          (uintptr_t)g_t2gen_v0384_original <= 0xC1F80000u)) {
+        printf("T2GEN V0.38.5 SNAPSHOT: non-SDRAM ptr=%p; disabled\n",
+               (void *)g_t2gen_v0384_original);
+        free(g_t2gen_v0384_original);
+        g_t2gen_v0384_original = NULL;
+    }
+    if (!g_t2gen_v0384_original) {
+        printf("T2GEN V0.38.4: snapshot allocation failed\n");
+        return;
+    }
+    for (i = 0; i < 65536u; ++i)
+        g_t2gen_v0384_original[i] =
+            (uintptr_t)m68ki_instruction_jump_table[i];
+    g_t2gen_v0384_original_hash = t2gen_v0384_table_hash();
+    g_t2gen_v0384_snapshot_ready = 1;
+    printf("T2GEN V0.38.4 TABLE_INIT: ptr=%p hash=%08lx entries=65536\n",
+        (void *)m68ki_instruction_jump_table,
+        (unsigned long)g_t2gen_v0384_original_hash);
+}
+void t2gen_v0384_table_check(unsigned long frame)
+{
+    unsigned int i, changes = 0;
+    uint32_t h = t2gen_v0384_table_hash();
+    if (!g_t2gen_v0384_snapshot_ready) return;
+    if (h == g_t2gen_v0384_original_hash)
+    {
+        printf("T2GEN V0.38.4 TABLE_CHECK: frame=%lu hash=%08lx status=OK\n",
+            frame, (unsigned long)h);
+        return;
+    }
+    for (i = 0; i < 65536u; ++i)
+    {
+        uintptr_t now = (uintptr_t)m68ki_instruction_jump_table[i];
+        if (now != g_t2gen_v0384_original[i])
+        {
+            if (changes < 12)
+                printf("T2GEN V0.38.4 TABLE_DIFF: opcode=%04x old=%08lx new=%08lx\n",
+                    i, (unsigned long)g_t2gen_v0384_original[i],
+                    (unsigned long)now);
+            changes++;
+        }
+    }
+    printf("T2GEN V0.38.4 TABLE_CHECK: frame=%lu expected=%08lx actual=%08lx changes=%u status=CORRUPT\n",
+        frame, (unsigned long)g_t2gen_v0384_original_hash,
+        (unsigned long)h, changes);
+}
+/* Every Musashi indirect dispatch passes through this guard, including
+ * fallback dispatches in the native fast paths.  REG_IR is uint16_t.
+ * On failure, return from m68k_execute without jumping to invalid code.
+ */
+#define T2GEN_V0384_CALL_HANDLER() do { \
+    unsigned int t2op = (unsigned int)REG_IR & 0xffffu; \
+    uintptr_t target = (uintptr_t)m68ki_instruction_jump_table[t2op]; \
+    if (target < 0x08000001u || target >= 0x08200000u || !(target & 1u)) { \
+        printf("T2GEN V0.38.4 BAD_HANDLER: opcode=%04x target=%08lx table=%p entry=%p emu_pc=%08lx emu_ppc=%08lx cycles=%ld\n", \
+            t2op, (unsigned long)target, \
+            (void *)m68ki_instruction_jump_table, \
+            (void *)&m68ki_instruction_jump_table[t2op], \
+            (unsigned long)M68KI_REG_PC, (unsigned long)REG_PPC, \
+            (long)GET_CYCLES()); \
+        t2gen_v0384_table_check(0); \
+        return -1; \
+    } \
+    m68ki_instruction_jump_table[t2op](); \
+} while (0)
+
 /* Execute some instructions until we use up num_cycles clock cycles */
 /* ASG: removed per-instruction interrupt checks */
 int m68k_execute(int num_cycles)
@@ -1280,6 +1517,7 @@ t2n_v018_next_instruction:
 
 			/* Read an instruction and call its handler */
 			REG_IR = m68ki_read_imm_16();
+            t2gen_v0387_sample(REG_PPC, REG_IR);
 #ifdef T2GEN_V021_OPCODE_PROFILE
             t2gen_v021_record(REG_IR);
 #endif
@@ -1291,6 +1529,7 @@ t2n_v018_next_instruction:
              * All other cases execute the original Musashi handler. */
             {
                 int native_done = 0;
+                int t2gen_v0388_native = 0;
 #ifdef T2GEN_V026_FAST_DISPATCH
                 /* Opcode-first fast path: avoid the PC switch for the two
                  * fully decoded native opcode families. Do not alter the
@@ -1350,15 +1589,17 @@ t2n_v018_next_instruction:
                     if (addr == 0x00ff03b0u)
                     {
                         uint16_t w = (uint16_t)m68ki_read_16(addr);
-                        struct t2n_sync_result r = t2n_cmp_word(REG_D[1], w, m68ki_get_sr());
+                        struct t2n_sync_result r = t2n_v041_cmp_word(REG_D[1], w, m68ki_get_sr());
                         m68ki_set_ccr(r.ccr);
                         g_t2gen_v010_native_cmp_count++;
                     }
                     else
                     {
                         REG_IR = 0x4afcu;
-                        m68ki_instruction_jump_table[REG_IR]();
+                        T2GEN_V0384_CALL_HANDLER();
+                        t2gen_v0388_native = 0;
                     }
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
                 if (REG_PPC == 0x00006120u && REG_IR == 0xb079u)
@@ -1374,8 +1615,10 @@ t2n_v018_next_instruction:
                     else
                     {
                         REG_IR = 0x4afcu;
-                        m68ki_instruction_jump_table[REG_IR]();
+                        T2GEN_V0384_CALL_HANDLER();
+                        t2gen_v0388_native = 0;
                     }
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
                 if (REG_PPC == 0x0000a0e4u && REG_IR == 0x4a79u)
@@ -1391,8 +1634,10 @@ t2n_v018_next_instruction:
                     else
                     {
                         REG_IR = 0x4afcu;
-                        m68ki_instruction_jump_table[REG_IR]();
+                        T2GEN_V0384_CALL_HANDLER();
+                        t2gen_v0388_native = 0;
                     }
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
 #ifdef T2GEN_V023_NATIVE_5670
@@ -1409,9 +1654,10 @@ t2n_v018_next_instruction:
                     else
                     {
                         REG_IR = 0x4afcu;
-                        m68ki_instruction_jump_table[REG_IR]();
+                        T2GEN_V0384_CALL_HANDLER();
                         g_t2gen_v023_fallback[0]++;
                     }
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
                 if (REG_PPC == 0x00005676u && REG_IR == 0x67f8u)
@@ -1424,6 +1670,7 @@ t2n_v018_next_instruction:
                         m68ki_branch_8(0xf8u);
                     }
                     else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
 #endif
@@ -1439,6 +1686,7 @@ t2n_v018_next_instruction:
                         m68ki_branch_8(0xf8u);
                     }
                     else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
                 if (REG_PPC == 0x00006126u && REG_IR == 0x67f8u)
@@ -1452,6 +1700,7 @@ t2n_v018_next_instruction:
                         m68ki_branch_8(0xf8u);
                     }
                     else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
                 if (REG_PPC == 0x0000a0eau && REG_IR == 0x66f8u)
@@ -1465,6 +1714,7 @@ t2n_v018_next_instruction:
                         m68ki_branch_8(0xf8u);
                     }
                     else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
 #endif
@@ -1487,15 +1737,17 @@ t2n_v018_next_instruction:
                     if (addr == 0x00ff03b0u)
                     {
                         uint16_t w = (uint16_t)m68ki_read_16(addr);
-                        struct t2n_sync_result r = t2n_cmp_word(REG_D[1], w, m68ki_get_sr());
+                        struct t2n_sync_result r = t2n_v041_cmp_word(REG_D[1], w, m68ki_get_sr());
                         m68ki_set_ccr(r.ccr);
                         g_t2gen_v010_native_cmp_count++;
                     }
                     else
                     {
                         REG_IR = 0x4afcu;
-                        m68ki_instruction_jump_table[REG_IR]();
+                        T2GEN_V0384_CALL_HANDLER();
+                        t2gen_v0388_native = 0;
                     }
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
                 break;
@@ -1513,8 +1765,10 @@ t2n_v018_next_instruction:
                     else
                     {
                         REG_IR = 0x4afcu;
-                        m68ki_instruction_jump_table[REG_IR]();
+                        T2GEN_V0384_CALL_HANDLER();
+                        t2gen_v0388_native = 0;
                     }
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
                 break;
@@ -1532,8 +1786,10 @@ t2n_v018_next_instruction:
                     else
                     {
                         REG_IR = 0x4afcu;
-                        m68ki_instruction_jump_table[REG_IR]();
+                        T2GEN_V0384_CALL_HANDLER();
+                        t2gen_v0388_native = 0;
                     }
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
                 break;
@@ -1552,9 +1808,10 @@ t2n_v018_next_instruction:
                     else
                     {
                         REG_IR = 0x4afcu;
-                        m68ki_instruction_jump_table[REG_IR]();
+                        T2GEN_V0384_CALL_HANDLER();
                         g_t2gen_v023_fallback[0]++;
                     }
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
                 break;
@@ -1569,6 +1826,7 @@ t2n_v018_next_instruction:
                         m68ki_branch_8(0xf8u);
                     }
                     else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
                 break;
@@ -1586,6 +1844,7 @@ t2n_v018_next_instruction:
                         m68ki_branch_8(0xf8u);
                     }
                     else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
                 break;
@@ -1601,6 +1860,7 @@ t2n_v018_next_instruction:
                         m68ki_branch_8(0xf8u);
                     }
                     else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
                 break;
@@ -1616,6 +1876,7 @@ t2n_v018_next_instruction:
                         m68ki_branch_8(0xf8u);
                     }
                     else USE_CYCLES(CYC_BCC_NOTAKE_B);
+                    t2gen_v0388_native = (REG_IR != 0x4afcu);
                     goto t2gen_v027_dispatch_done;
                 }
                 break;
@@ -1773,7 +2034,7 @@ t2n_v018_next_instruction:
                             /* The extension words have already been consumed.
                              * Match existing native dispatch mismatch policy. */
                             REG_IR = 0x4afcu;
-                            m68ki_instruction_jump_table[REG_IR]();
+                            T2GEN_V0384_CALL_HANDLER();
                             g_t2gen_v023_fallback[0]++;
                         }
                         native_done = 1;
@@ -1803,14 +2064,14 @@ t2n_v018_next_instruction:
                         if (addr == 0x00ff03b0u)
                         {
                             uint16_t w = (uint16_t)m68ki_read_16(addr);
-                            struct t2n_sync_result r = t2n_cmp_word(REG_D[1], w, m68ki_get_sr());
+                            struct t2n_sync_result r = t2n_v041_cmp_word(REG_D[1], w, m68ki_get_sr());
                             m68ki_set_ccr(r.ccr);
                             g_t2gen_v010_native_cmp_count++;
                         }
                         else
                         {
                             REG_IR = 0x4afcu;
-                            m68ki_instruction_jump_table[REG_IR]();
+                            T2GEN_V0384_CALL_HANDLER();
                         }
                         native_done = 1;
                     }
@@ -1829,7 +2090,7 @@ t2n_v018_next_instruction:
                         else
                         {
                             REG_IR = 0x4afcu;
-                            m68ki_instruction_jump_table[REG_IR]();
+                            T2GEN_V0384_CALL_HANDLER();
                         }
                         native_done = 1;
                     }
@@ -1848,7 +2109,7 @@ t2n_v018_next_instruction:
                         else
                         {
                             REG_IR = 0x4afcu;
-                            m68ki_instruction_jump_table[REG_IR]();
+                            T2GEN_V0384_CALL_HANDLER();
                         }
                         native_done = 1;
                     }
@@ -1954,9 +2215,10 @@ t2n_v018_next_instruction:
                     break;
                 }
                 if (!native_done)
-                    m68ki_instruction_jump_table[REG_IR]();
+                    T2GEN_V0384_CALL_HANDLER();
 #ifdef T2GEN_V027_FAST_POLL
             t2gen_v027_dispatch_done:
+                t2gen_v0388_count(REG_PPC, t2gen_v0388_native || native_done);
                 ; /* Shared original instruction epilogue. */
 #endif
 #ifdef T2GEN_V026_FAST_DISPATCH
@@ -1978,7 +2240,7 @@ t2n_v018_next_instruction:
 				if (addr == 0x00ff03b0u)
 				{
 					uint16_t w = (uint16_t)m68ki_read_16(addr);
-					struct t2n_sync_result r = t2n_cmp_word(REG_D[1], w, m68ki_get_sr());
+					struct t2n_sync_result r = t2n_v041_cmp_word(REG_D[1], w, m68ki_get_sr());
 					m68ki_set_ccr(r.ccr);
 					g_t2gen_v010_native_cmp_count++;
 				}
@@ -1987,7 +2249,7 @@ t2n_v018_next_instruction:
 					/* Unexpected ROM modification: do not silently
 					 * execute an instruction with a wrong address. */
 					REG_IR = 0x4afcu; /* ILLEGAL opcode */
-					m68ki_instruction_jump_table[REG_IR]();
+					T2GEN_V0384_CALL_HANDLER();
 				}
 			}
 #ifdef T2GEN_V011_NATIVE_SYNC_EXEC
@@ -2004,7 +2266,7 @@ t2n_v018_next_instruction:
                 else
                 {
                     REG_IR = 0x4afcu;
-                    m68ki_instruction_jump_table[REG_IR]();
+                    T2GEN_V0384_CALL_HANDLER();
                 }
             }
             else if (REG_PPC == 0x0000a0e4u && REG_IR == 0x4a79u)
@@ -2020,7 +2282,7 @@ t2n_v018_next_instruction:
                 else
                 {
                     REG_IR = 0x4afcu;
-                    m68ki_instruction_jump_table[REG_IR]();
+                    T2GEN_V0384_CALL_HANDLER();
                 }
             }
 #endif
@@ -2054,7 +2316,7 @@ t2n_v018_next_instruction:
 			else
 #endif
 			{
-				m68ki_instruction_jump_table[REG_IR]();
+				T2GEN_V0384_CALL_HANDLER();
 			}
 #endif /* T2GEN_V016_SWITCH_DISPATCH */
 			USE_CYCLES(CYC_INSTRUCTION[REG_IR]);
@@ -2074,6 +2336,12 @@ t2n_v018_next_instruction:
                                      M68KI_REG_PC == 0x00006126u ? 1u : 2u;
                 unsigned int expected = which == 2u ? 0x66f8u : 0x67f8u;
                 int j;
+#ifdef T2GEN_V042_PAIR_PROFILE
+                /* Scope timing to the branch half of the paired dispatch.
+                 * CMP itself is timed by the normal dispatch, not here. */
+                int v042_measuring = (which == 0u && v042_cycle_enabled());
+                uint32_t v042_start = v042_measuring ? v042_cycle_now() : 0u;
+#endif
                 /* Finish the CMP/TST instruction before starting BEQ/BNE. */
                 m68ki_exception_if_trace();
                 m68ki_trace_t1();
@@ -2083,27 +2351,55 @@ t2n_v018_next_instruction:
                 for (j = 15; j >= 0; j--)
                     REG_DA_SAVE[j] = REG_DA[j];
                 REG_IR = m68ki_read_imm_16();
+                t2gen_v0387_sample(REG_PPC, REG_IR);
                 if (REG_IR == expected)
                 {
+                    #ifdef T2GEN_V03811_PAIR_STATS
                     g_t2gen_v016_paired_count[which]++;
+#endif
+                    t2gen_v0388_count(REG_PPC, 1);
                     int taken = which == 2u ? COND_NE() : COND_EQ();
+#ifdef T2GEN_V042_PAIR_PROFILE
+                    if (which == 0u)
+                    {
+                        g_v042_pairs++;
+                        if (taken) g_v042_taken++;
+                        else g_v042_not_taken++;
+                    }
+#endif
                     g_t2gen_v012_branch_count[which]++;
                     if (taken)
                     {
                         g_t2gen_v012_branch_taken[which]++;
                         m68ki_trace_t0();
-                        m68ki_branch_8(MASK_OUT_ABOVE_8(REG_IR));
+                        /* Validated opcode is BEQ.S/BNE.S -8. The immediate
+                         * fetch above remains mandatory for ROM correctness. */
+                        m68ki_branch_8(0xf8u);
                     }
                     else
                         USE_CYCLES(CYC_BCC_NOTAKE_B);
                 }
                 else
                 {
+                    #ifdef T2GEN_V03811_PAIR_STATS
                     g_t2gen_v016_paired_fallback[which]++;
+#endif
+#ifdef T2GEN_V042_PAIR_PROFILE
+                    if (which == 0u) g_v042_fallback++;
+#endif
                     /* Modified ROM: fall back to Musashi's opcode table. */
-                    m68ki_instruction_jump_table[REG_IR]();
+                    T2GEN_V0384_CALL_HANDLER();
                 }
                 USE_CYCLES(CYC_INSTRUCTION[REG_IR]);
+#ifdef T2GEN_V042_PAIR_PROFILE
+                if (which == 0u)
+                {
+                    if (v042_measuring)
+                        g_v042_cycles += (uint32_t)(v042_cycle_now() - v042_start);
+                    else
+                        g_v042_no_cycle_counter++;
+                }
+#endif
             }
 #endif
 

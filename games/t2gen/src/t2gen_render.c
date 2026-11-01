@@ -1,4 +1,5 @@
-/* T2GEN V0.38: optional AXI SRAM resident decoded tile cache.
+/* T2GEN V0.38.6: force DMA2D staging into SDRAM; reject overlapping heaps.
+ * T2GEN V0.38: optional AXI SRAM resident decoded tile cache.
  * T2GEN V0.37: DWT cycle-level SRAM versus SDRAM access probes.
  * T2GEN V0.36: low-overhead SDRAM/tile-cache bandwidth probes.
  * T2GEN V0.35: span-specialized fused compositor.
@@ -51,17 +52,17 @@ static uint16_t vrword(const struct t2gen_vdp_s *v, uint32_t addr)
  */
 #define T2GEN_TILE_COUNT 2048u
 #define T2GEN_TILE_BYTES 64u
-/* V0.38.2: SRAM1 tile cache. Requires flash.ld section:
+/* V0.38.3: SRAM2 tile cache. Requires flash.ld section:
  * .t2_tile_cache (NOLOAD) : { . = ALIGN(32); KEEP(*(.t2_tile_cache))
- *                             . = ALIGN(32); } > sram1
- * SRAM1 must NOT be registered as a NuttX heap or used by other sections.
- * Disable with -DT2GEN_V038_SRAM1_TILE_CACHE=0 to use heap fallback.
+ *                             . = ALIGN(32); } > sram2
+ * SRAM2 must NOT be registered as a NuttX heap or used by other sections.
+ * Disable with -DT2GEN_V038_SRAM2_TILE_CACHE=0 to use heap fallback.
  */
-#ifndef T2GEN_V038_SRAM1_TILE_CACHE
-# define T2GEN_V038_SRAM1_TILE_CACHE 1
+#ifndef T2GEN_V038_SRAM2_TILE_CACHE
+# define T2GEN_V038_SRAM2_TILE_CACHE 1
 #endif
-#if T2GEN_V038_SRAM1_TILE_CACHE
-static uint8_t g_v038_sram1_tile_cache[T2GEN_TILE_COUNT * T2GEN_TILE_BYTES]
+#if T2GEN_V038_SRAM2_TILE_CACHE
+static uint8_t g_v038_sram2_tile_cache[T2GEN_TILE_COUNT * T2GEN_TILE_BYTES]
   __attribute__((section(".t2_tile_cache"), aligned(32), used));
 #endif
 static uint8_t *g_tile_cache;
@@ -78,13 +79,13 @@ static void tile_cache_begin(const struct t2gen_vdp_s *v)
 {
   if (!g_tile_cache)
     {
-#if T2GEN_V038_SRAM1_TILE_CACHE
-      /* Confirm the entire 128 KiB buffer resides inside SRAM1. */
-      uintptr_t addr = (uintptr_t)g_v038_sram1_tile_cache;
-      if (addr == 0x30000000u)
+#if T2GEN_V038_SRAM2_TILE_CACHE
+      /* Confirm the entire 128 KiB buffer resides inside SRAM2. */
+      uintptr_t addr = (uintptr_t)g_v038_sram2_tile_cache;
+      if (addr == 0x30020000u)
         {
-          g_tile_cache = g_v038_sram1_tile_cache;
-          g_v038_cache_region = "SRAM1";
+          g_tile_cache = g_v038_sram2_tile_cache;
+          g_v038_cache_region = "SRAM2";
         }
 #endif
       if (!g_tile_cache)
@@ -99,10 +100,10 @@ static void tile_cache_begin(const struct t2gen_vdp_s *v)
   if (!g_v038_cache_reported)
     {
       printf("T2GEN V0.38 TILE_CACHE: region=%s ptr=%p bytes=%u "
-             "sram1_enabled=%u ready=%u\n",
+             "sram2_enabled=%u ready=%u\n",
              g_v038_cache_region, (void *)g_tile_cache,
              T2GEN_TILE_COUNT * T2GEN_TILE_BYTES,
-             (unsigned)T2GEN_V038_SRAM1_TILE_CACHE, (unsigned)g_cache_ready);
+             (unsigned)T2GEN_V038_SRAM2_TILE_CACHE, (unsigned)g_cache_ready);
       g_v038_cache_reported = true;
     }
   if (g_cache_reset_serial != v->tile_reset_serial)
@@ -880,20 +881,44 @@ static int framebuffer_init(const char *device)
       g_pi.stride < OUT_W || g_pi.fblen < g_pi.stride * OUT_H ||
       !g_pi.fbmem) goto fail;
 #ifdef CONFIG_STM32_DMA2D
-  /* Source must reside in DMA-accessible SRAM/SDRAM, never DTCM. */
-  g_dma_lines = (uint8_t *)memalign(32, 640u * SRC_H);
-  if (g_dma_lines && (uintptr_t)g_dma_lines >= 0x24000000u &&
-      (uintptr_t)g_dma_lines < 0xe0000000u)
-    {
-      g_dma_enabled = true;
-      printf("T2GEN V9.5: DMA2D staging=%p\n", g_dma_lines);
-    }
-  else
-    {
-      printf("T2GEN V9.5: no DMA-accessible staging; CPU fallback\n");
-      free(g_dma_lines);
-      g_dma_lines = NULL;
-    }
+  /* V0.38.6: SRAM1/SRAM2 form a contiguous 256 KiB heap region on
+   * this board. The original 140 KiB memalign(32) allocation started at
+   * 0x30000020 and extended into the dedicated SRAM2 tile cache.
+   * Request 512 KiB so this board's multi-region allocator selects SDRAM.
+   * Accept ONLY a complete buffer inside the configured 32 MiB SDRAM
+   * aperture. If unavailable, fall back to the CPU renderer rather than
+   * risk overwriting the tile cache. Keep the memalign pointer for free.
+   * This remains board-specific; a dedicated SDRAM heap is preferable.
+   */
+  {
+    const size_t staging_bytes = 640u * SRC_H;
+    const size_t reserve_bytes = 512u * 1024u;
+    const uintptr_t sdram_base = 0xc0000000u;
+    const uintptr_t sdram_end = 0xc2000000u;
+    uintptr_t addr;
+    g_dma_lines = (uint8_t *)memalign(32, reserve_bytes);
+    addr = (uintptr_t)g_dma_lines;
+    if (g_dma_lines && addr >= sdram_base && addr < sdram_end &&
+        reserve_bytes <= sdram_end - addr &&
+        staging_bytes <= sdram_end - addr)
+      {
+        g_dma_enabled = true;
+        printf("T2GEN V0.38.6 STAGING_ALLOC: region=SDRAM ptr=%p "
+               "used_bytes=%lu reserved_bytes=%lu end=%p status=OK\n",
+               g_dma_lines, (unsigned long)staging_bytes,
+               (unsigned long)reserve_bytes,
+               (void *)(addr + staging_bytes));
+      }
+    else
+      {
+        printf("T2GEN V0.38.6 STAGING_ALLOC: ptr=%p "
+               "used_bytes=%lu status=REJECTED CPU_FALLBACK\n",
+               g_dma_lines, (unsigned long)staging_bytes);
+        free(g_dma_lines);
+        g_dma_lines = NULL;
+        g_dma_enabled = false;
+      }
+  }
 #endif
   printf("T2GEN V9.8.2: framebuffer ready fd=%d fb=%p stride=%lu DMA=%u\n",
          g_fd, g_pi.fbmem, (unsigned long)g_pi.stride,
@@ -1002,10 +1027,24 @@ int t2gen_render_snapshot(const char *device)
    * signed offsets used by the previous per-pixel implementation. */
   int16_t scroll_a[320];
   int16_t scroll_b[320];
-  for (unsigned x = 0; x < src_w; ++x)
+  /* V0.39: full-screen V-scroll is constant across the scanline. */
+  if ((v->reg[11] & 4u) == 0u)
     {
-      scroll_a[x] = vscroll(v, 0u, x);
-      scroll_b[x] = vscroll(v, 1u, x);
+      const int16_t va = vscroll(v, 0u, 0u);
+      const int16_t vb = vscroll(v, 1u, 0u);
+      for (unsigned x = 0; x < src_w; ++x)
+        {
+          scroll_a[x] = va;
+          scroll_b[x] = vb;
+        }
+    }
+  else
+    {
+      for (unsigned x = 0; x < src_w; ++x)
+        {
+          scroll_a[x] = vscroll(v, 0u, x);
+          scroll_b[x] = vscroll(v, 1u, x);
+        }
     }
   unsigned nonzero=0, sprite_pixels=0;
   if (framebuffer_init(device)<0)
@@ -1061,8 +1100,8 @@ int t2gen_render_snapshot(const char *device)
             visible[count++]=(uint8_t)i;
           }
       uint8_t sprite_lo[320], sprite_hi[320];
-      memset(sprite_lo,0,sizeof(sprite_lo));
-      memset(sprite_hi,0,sizeof(sprite_hi));
+      memset(sprite_lo,0,src_w);
+      memset(sprite_hi,0,src_w);
       if (g_view == 0u || g_view == 4u || g_view == 5u)
         sprite_scanline(v, sprites, visible, count, y, src_w,
                         sprite_lo, sprite_hi);

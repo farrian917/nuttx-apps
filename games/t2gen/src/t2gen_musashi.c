@@ -158,7 +158,11 @@ static uint32_t g_trace_long_ram;
 static uint32_t g_trace_word_ram;
 static uint32_t g_trace_long_other;
 static uint32_t g_trace_word_other;
-static void t2gen_trace_rom(const uint8_t *rom, size_t len)
+extern void t2gen_v0384_table_snapshot(void);
+extern void t2gen_v0384_table_check(unsigned long frame);
+extern void t2gen_v0387_report(unsigned long frame);
+extern void t2gen_v0388_report(unsigned long frame);
+void t2gen_trace_rom(const uint8_t *rom, size_t len)
 {
   static const uint32_t addresses[] = {0x00025cu, 0x004ab0u, 0x00eb02u, 0x00aa0eu};
   unsigned j;
@@ -928,6 +932,14 @@ extern unsigned long t2gen_v010_native_cmp_count(void);
 extern unsigned long t2gen_v011_native_cmp_d0_count(void);
 extern unsigned long t2gen_v011_native_tst_count(void);
 #ifdef CONFIG_GAMES_T2GEN_V015_PAIRED_SYNC
+#ifdef CONFIG_GAMES_T2GEN_V042_PAIR_PROFILE
+extern unsigned long t2gen_v042_pairs(void);
+extern unsigned long t2gen_v042_taken(void);
+extern unsigned long t2gen_v042_not_taken(void);
+extern unsigned long t2gen_v042_fallback(void);
+extern unsigned long t2gen_v042_no_counter(void);
+extern uint64_t t2gen_v042_cycles(void);
+#endif
 extern unsigned long t2gen_v016_paired_count(unsigned int i);
 extern unsigned long t2gen_v016_paired_fallback(unsigned int i);
 #endif
@@ -1108,7 +1120,19 @@ printf("T2GEN: Musashi tables allocated\n");
 
 t2gen_vdp_reset();
 t2gen_vdp_set_dma_reader(genesis_dma_read16);
+#ifdef CONFIG_GAMES_T2GEN_V015_PAIRED_SYNC
+  printf("T2GEN V0.38.11 PAIRED_CONFIG: enabled=1 source=V015_PAIRED_SYNC stats=%d\n",
+#ifdef CONFIG_GAMES_T2GEN_V03811_PAIR_STATS
+         1
+#else
+         0
+#endif
+         );
+#else
+  printf("T2GEN V0.38.11 PAIRED_CONFIG: enabled=0 (enable CONFIG_GAMES_T2GEN_V015_PAIRED_SYNC)\n");
+#endif
 m68k_init();
+  t2gen_v0384_table_snapshot();
 m68k_set_cpu_type(M68K_CPU_TYPE_68000);
 xbox_open();
 m68k_pulse_reset();
@@ -1283,6 +1307,57 @@ m68k_pulse_reset();
                     t2gen_render_print_window(dt, render_us - fps_render_us_start);
                   fps_render_us_start = render_us;
                   fps_start = wall_now;
+#if defined(CONFIG_GAMES_T2GEN_V015_PAIRED_SYNC) && defined(CONFIG_GAMES_T2GEN_V03811_PAIR_STATS)
+                  {
+                    static unsigned long previous_pairs[3];
+                    static unsigned long previous_fallbacks[3];
+                    unsigned long pairs[3], fallbacks[3];
+                    unsigned int i;
+                    for (i = 0; i < 3; i++)
+                      {
+                        pairs[i] = t2gen_v016_paired_count(i);
+                        fallbacks[i] = t2gen_v016_paired_fallback(i);
+                      }
+                    printf("T2GEN V0.38.11 PAIRED_WINDOW: frame=%lu a12e_a134=%lu 6120_6126=%lu a0e4_a0ea=%lu fallback=%lu,%lu,%lu\n",
+                           (unsigned long)g_pad_frame,
+                           pairs[0] - previous_pairs[0],
+                           pairs[1] - previous_pairs[1],
+                           pairs[2] - previous_pairs[2],
+                           fallbacks[0] - previous_fallbacks[0],
+                           fallbacks[1] - previous_fallbacks[1],
+                           fallbacks[2] - previous_fallbacks[2]);
+                    for (i = 0; i < 3; i++)
+                      {
+                        previous_pairs[i] = pairs[i];
+                        previous_fallbacks[i] = fallbacks[i];
+                      }
+                  }
+#endif
+#if defined(CONFIG_GAMES_T2GEN_V042_PAIR_PROFILE) && defined(CONFIG_GAMES_T2GEN_V015_PAIRED_SYNC)
+                  {
+                    static unsigned long prev_pairs, prev_taken, prev_not, prev_fb, prev_missing;
+                    static uint64_t prev_cycles;
+                    unsigned long pairs = t2gen_v042_pairs();
+                    unsigned long taken = t2gen_v042_taken();
+                    unsigned long not_taken = t2gen_v042_not_taken();
+                    unsigned long fallback = t2gen_v042_fallback();
+                    unsigned long missing = t2gen_v042_no_counter();
+                    uint64_t cycles = t2gen_v042_cycles();
+                    unsigned long count = pairs - prev_pairs;
+                    uint64_t delta = cycles - prev_cycles;
+                    printf("T2GEN V0.42 PAIR_WINDOW: frame=%lu pairs=%lu taken=%lu not_taken=%lu fallback=%lu branch_arm_cycles=%llu avg_branch_cycles=%llu dwt_unavailable=%lu\n",
+                           (unsigned long)g_pad_frame, count, taken-prev_taken,
+                           not_taken-prev_not, fallback-prev_fb,
+                           (unsigned long long)delta,
+                           (unsigned long long)(count ? delta/count : 0),
+                           missing-prev_missing);
+                    prev_pairs=pairs; prev_taken=taken; prev_not=not_taken;
+                    prev_fb=fallback; prev_missing=missing; prev_cycles=cycles;
+                  }
+#endif
+                  t2gen_v0384_table_check((unsigned long)g_pad_frame);
+                  t2gen_v0387_report((unsigned long)g_pad_frame);
+                  t2gen_v0388_report((unsigned long)g_pad_frame);
                   fps_renders = 0;
                 }
             }

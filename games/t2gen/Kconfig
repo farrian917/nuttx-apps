@@ -26,6 +26,27 @@ config GAMES_T2GEN_V028_PC_HASH_DISPATCH
       instruction boundaries, cycles, and Musashi fallback. Toggle off
       for an A/B comparison against V0.27.
 
+config GAMES_T2GEN_V042_PAIR_PROFILE
+    bool "V0.42 profile native CMP+BEQ paired execution at A12E/A134"
+    default n
+    depends on GAMES_T2GEN_MUSASHI && GAMES_T2GEN_V015_PAIRED_SYNC && GAMES_T2GEN_V012_NATIVE_BRANCH_EXEC
+    help
+      Count A12E/A134 paired branch executions, taken/not-taken branches,
+      opcode mismatches and DWT cycles in the branch-half dispatch.
+      Prints a delta report every 300 emulated frames. Requires a board-
+      enabled DWT CYCCNT for timing; counts still work without it.
+      Instrumentation adds overhead; disable for performance benchmarks.
+
+config GAMES_T2GEN_V041_ARM_CMP
+    bool "V0.41 native ARM Thumb-2 CMP.W at ROM A12E"
+    default n
+    depends on GAMES_T2GEN_MUSASHI && GAMES_T2GEN_V010_NATIVE_CMP_EXEC
+    help
+      Use native ARM SUBS/condition flags for CMP.W at ROM 0xA12E.
+      Preserves 68000 X and computes 16-bit overflow explicitly.
+      The existing paired BEQ fast path and cycle/IRQ boundaries remain.
+      Compare frame fingerprints and FPS with this option off.
+
 config GAMES_T2GEN_V027_FAST_POLL
     bool "V0.27 fast PC dispatch for native polling loops (experimental)"
     default n
@@ -47,6 +68,14 @@ config GAMES_T2GEN_V026_FAST_DISPATCH
       epilogue. Compare with option disabled on the same hardware.
 
 endif
+
+config GAMES_T2GEN_V043_NATIVE_ONLY
+    bool "V0.43 standalone native-only block diagnostic (no Musashi)"
+    default n
+    depends on !GAMES_T2GEN_MUSASHI
+    help
+      Native Thumb-2 CMP.W + BEQ bounded block test with no Musashi
+      objects linked. NOT a playable emulator. Unsupported execution stops.
 
 config GAMES_T2GEN_MUSASHI
     bool "Use external Musashi 68000 core (requires vendored sources)"
@@ -171,13 +200,21 @@ config GAMES_T2GEN_V012_NATIVE_BRANCH_EXEC
 
 config GAMES_T2GEN_V015_PAIRED_SYNC
     bool "V0.15 EXPERIMENT: pair native sync compare/test and branch"
-    default n
+    default y
     depends on GAMES_T2GEN_V012_NATIVE_BRANCH_EXEC
     help
       Execute the next BEQ/BNE in the same dispatch iteration after
       a recognized CMP/TST, only if cycles remain. Preserve per-instruction
       fetch, PPC, register snapshot, cycle debit and trace boundaries.
       Experimental: verify using the V0.14 reference comparator.
+
+config GAMES_T2GEN_V03811_PAIR_STATS
+    bool "V0.38.11: count paired dispatches (adds hot-loop overhead)"
+    default n
+    depends on GAMES_T2GEN_V015_PAIRED_SYNC
+    help
+      Re-enable per-pair execution and fallback counters and periodic
+      PAIRED_WINDOW diagnostics. Leave disabled for FPS measurements.
 
 config GAMES_T2GEN_V016_SWITCH_DISPATCH
     bool "V0.16 EXPERIMENT: single-switch native instruction dispatch"
@@ -281,3 +318,13 @@ config GAMES_T2GEN_V025_NATIVE_MOVEQ
       keeps one-instruction trace, interrupt and cycle boundaries.
       Independent end-of-benchmark counters; disable V0.21/V0.22
       profiling for performance comparisons.
+
+config GAMES_T2GEN_V0389_DIAGNOSTIC_PROFILING
+    bool "V0.38.9 enable expensive CPU sampling and native-path counters"
+    default n
+    depends on GAMES_T2GEN_MUSASHI
+    help
+      Reenable the V0.38.7 sampled instruction profiler and V0.38.8
+      per-instruction utilization counters for diagnosis. Leave disabled
+      for meaningful FPS measurements. The paired-dispatch counters
+      remain available independently.

@@ -1,0 +1,1 @@
+T2GEN V1.03: Decode and emit SUBQ.W #1..8,Dn (including 0x5540 at ROM 0xE19A). Preserves working SEGA splash and native AOT. Next stop and VDP palette/sprite behavior require hardware logs. No fake VRAM content or palette forcing.

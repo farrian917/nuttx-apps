@@ -1,0 +1,32 @@
+{
+  "rom_crc32": "2f75e896",
+  "translated_blocks": 191,
+  "translated_instructions": 649,
+  "unsupported_sites": 18,
+  "unsupported_opcode_values": {
+    "0479": 1,
+    "0640": 2,
+    "0679": 1,
+    "08f9": 2,
+    "0c79": 1,
+    "117c": 1,
+    "1783": 1,
+    "2039": 1,
+    "23c0": 1,
+    "23df": 1,
+    "5201": 1,
+    "5301": 1,
+    "b479": 1,
+    "d400": 1,
+    "e349": 1,
+    "e588": 1
+  },
+  "other_stop_reasons": [
+    [
+      "000332",
+      "invalid 68000 destination EA for opcode 3abc (inspect ROM path)"
+    ]
+  ],
+  "unresolved_indirect": [],
+  "rom_coverage_complete": false
+}
