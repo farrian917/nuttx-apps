@@ -1,3 +1,0 @@
-ifneq ($(CONFIG_GAMES_T2NATIVE),)
-CONFIGURED_APPS += $(APPDIR)/games/t2native
-endif

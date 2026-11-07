@@ -932,14 +932,6 @@ extern unsigned long t2gen_v010_native_cmp_count(void);
 extern unsigned long t2gen_v011_native_cmp_d0_count(void);
 extern unsigned long t2gen_v011_native_tst_count(void);
 #ifdef CONFIG_GAMES_T2GEN_V015_PAIRED_SYNC
-#ifdef CONFIG_GAMES_T2GEN_V042_PAIR_PROFILE
-extern unsigned long t2gen_v042_pairs(void);
-extern unsigned long t2gen_v042_taken(void);
-extern unsigned long t2gen_v042_not_taken(void);
-extern unsigned long t2gen_v042_fallback(void);
-extern unsigned long t2gen_v042_no_counter(void);
-extern uint64_t t2gen_v042_cycles(void);
-#endif
 extern unsigned long t2gen_v016_paired_count(unsigned int i);
 extern unsigned long t2gen_v016_paired_fallback(unsigned int i);
 #endif
@@ -1331,28 +1323,6 @@ m68k_pulse_reset();
                         previous_pairs[i] = pairs[i];
                         previous_fallbacks[i] = fallbacks[i];
                       }
-                  }
-#endif
-#if defined(CONFIG_GAMES_T2GEN_V042_PAIR_PROFILE) && defined(CONFIG_GAMES_T2GEN_V015_PAIRED_SYNC)
-                  {
-                    static unsigned long prev_pairs, prev_taken, prev_not, prev_fb, prev_missing;
-                    static uint64_t prev_cycles;
-                    unsigned long pairs = t2gen_v042_pairs();
-                    unsigned long taken = t2gen_v042_taken();
-                    unsigned long not_taken = t2gen_v042_not_taken();
-                    unsigned long fallback = t2gen_v042_fallback();
-                    unsigned long missing = t2gen_v042_no_counter();
-                    uint64_t cycles = t2gen_v042_cycles();
-                    unsigned long count = pairs - prev_pairs;
-                    uint64_t delta = cycles - prev_cycles;
-                    printf("T2GEN V0.42 PAIR_WINDOW: frame=%lu pairs=%lu taken=%lu not_taken=%lu fallback=%lu branch_arm_cycles=%llu avg_branch_cycles=%llu dwt_unavailable=%lu\n",
-                           (unsigned long)g_pad_frame, count, taken-prev_taken,
-                           not_taken-prev_not, fallback-prev_fb,
-                           (unsigned long long)delta,
-                           (unsigned long long)(count ? delta/count : 0),
-                           missing-prev_missing);
-                    prev_pairs=pairs; prev_taken=taken; prev_not=not_taken;
-                    prev_fb=fallback; prev_missing=missing; prev_cycles=cycles;
                   }
 #endif
                   t2gen_v0384_table_check((unsigned long)g_pad_frame);

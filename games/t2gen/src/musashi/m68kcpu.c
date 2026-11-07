@@ -62,36 +62,6 @@ unsigned long t2gen_v016_paired_count(unsigned int i)
 unsigned long t2gen_v016_paired_fallback(unsigned int i)
 { return i < 3 ? g_t2gen_v016_paired_fallback[i] : 0; }
 #endif
-#ifdef T2GEN_V042_PAIR_PROFILE
-/* Diagnostic-only counters. CYCCNT is read only when already enabled by
- * the board; this feature never changes the system debug configuration. */
-static unsigned long g_v042_pairs, g_v042_taken, g_v042_not_taken;
-static unsigned long g_v042_fallback, g_v042_no_cycle_counter;
-static uint64_t g_v042_cycles;
-static inline uint32_t v042_cycle_now(void)
-{
-#if defined(__arm__) || defined(__thumb__)
-  return *(volatile const uint32_t *)0xe0001004u;
-#else
-  return 0;
-#endif
-}
-static inline int v042_cycle_enabled(void)
-{
-#if defined(__arm__) || defined(__thumb__)
-  return ((*(volatile const uint32_t *)0xe000edfcU & (1u << 24)) != 0u) &&
-         ((*(volatile const uint32_t *)0xe0001000U & 1u) != 0u);
-#else
-  return 0;
-#endif
-}
-unsigned long t2gen_v042_pairs(void) { return g_v042_pairs; }
-unsigned long t2gen_v042_taken(void) { return g_v042_taken; }
-unsigned long t2gen_v042_not_taken(void) { return g_v042_not_taken; }
-unsigned long t2gen_v042_fallback(void) { return g_v042_fallback; }
-unsigned long t2gen_v042_no_counter(void) { return g_v042_no_cycle_counter; }
-uint64_t t2gen_v042_cycles(void) { return g_v042_cycles; }
-#endif
 #ifdef T2GEN_V018_ROUTINE_DISPATCH
 static unsigned long g_t2gen_v018_followup[3];
 static unsigned long g_t2gen_v018_exit[3];
@@ -1589,7 +1559,7 @@ t2n_v018_next_instruction:
                     if (addr == 0x00ff03b0u)
                     {
                         uint16_t w = (uint16_t)m68ki_read_16(addr);
-                        struct t2n_sync_result r = t2n_v041_cmp_word(REG_D[1], w, m68ki_get_sr());
+                        struct t2n_sync_result r = t2n_cmp_word(REG_D[1], w, m68ki_get_sr());
                         m68ki_set_ccr(r.ccr);
                         g_t2gen_v010_native_cmp_count++;
                     }
@@ -1737,7 +1707,7 @@ t2n_v018_next_instruction:
                     if (addr == 0x00ff03b0u)
                     {
                         uint16_t w = (uint16_t)m68ki_read_16(addr);
-                        struct t2n_sync_result r = t2n_v041_cmp_word(REG_D[1], w, m68ki_get_sr());
+                        struct t2n_sync_result r = t2n_cmp_word(REG_D[1], w, m68ki_get_sr());
                         m68ki_set_ccr(r.ccr);
                         g_t2gen_v010_native_cmp_count++;
                     }
@@ -2064,7 +2034,7 @@ t2n_v018_next_instruction:
                         if (addr == 0x00ff03b0u)
                         {
                             uint16_t w = (uint16_t)m68ki_read_16(addr);
-                            struct t2n_sync_result r = t2n_v041_cmp_word(REG_D[1], w, m68ki_get_sr());
+                            struct t2n_sync_result r = t2n_cmp_word(REG_D[1], w, m68ki_get_sr());
                             m68ki_set_ccr(r.ccr);
                             g_t2gen_v010_native_cmp_count++;
                         }
@@ -2240,7 +2210,7 @@ t2n_v018_next_instruction:
 				if (addr == 0x00ff03b0u)
 				{
 					uint16_t w = (uint16_t)m68ki_read_16(addr);
-					struct t2n_sync_result r = t2n_v041_cmp_word(REG_D[1], w, m68ki_get_sr());
+					struct t2n_sync_result r = t2n_cmp_word(REG_D[1], w, m68ki_get_sr());
 					m68ki_set_ccr(r.ccr);
 					g_t2gen_v010_native_cmp_count++;
 				}
@@ -2336,12 +2306,6 @@ t2n_v018_next_instruction:
                                      M68KI_REG_PC == 0x00006126u ? 1u : 2u;
                 unsigned int expected = which == 2u ? 0x66f8u : 0x67f8u;
                 int j;
-#ifdef T2GEN_V042_PAIR_PROFILE
-                /* Scope timing to the branch half of the paired dispatch.
-                 * CMP itself is timed by the normal dispatch, not here. */
-                int v042_measuring = (which == 0u && v042_cycle_enabled());
-                uint32_t v042_start = v042_measuring ? v042_cycle_now() : 0u;
-#endif
                 /* Finish the CMP/TST instruction before starting BEQ/BNE. */
                 m68ki_exception_if_trace();
                 m68ki_trace_t1();
@@ -2359,14 +2323,6 @@ t2n_v018_next_instruction:
 #endif
                     t2gen_v0388_count(REG_PPC, 1);
                     int taken = which == 2u ? COND_NE() : COND_EQ();
-#ifdef T2GEN_V042_PAIR_PROFILE
-                    if (which == 0u)
-                    {
-                        g_v042_pairs++;
-                        if (taken) g_v042_taken++;
-                        else g_v042_not_taken++;
-                    }
-#endif
                     g_t2gen_v012_branch_count[which]++;
                     if (taken)
                     {
@@ -2384,22 +2340,10 @@ t2n_v018_next_instruction:
                     #ifdef T2GEN_V03811_PAIR_STATS
                     g_t2gen_v016_paired_fallback[which]++;
 #endif
-#ifdef T2GEN_V042_PAIR_PROFILE
-                    if (which == 0u) g_v042_fallback++;
-#endif
                     /* Modified ROM: fall back to Musashi's opcode table. */
                     T2GEN_V0384_CALL_HANDLER();
                 }
                 USE_CYCLES(CYC_INSTRUCTION[REG_IR]);
-#ifdef T2GEN_V042_PAIR_PROFILE
-                if (which == 0u)
-                {
-                    if (v042_measuring)
-                        g_v042_cycles += (uint32_t)(v042_cycle_now() - v042_start);
-                    else
-                        g_v042_no_cycle_counter++;
-                }
-#endif
             }
 #endif
 
