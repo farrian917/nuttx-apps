@@ -1,0 +1,20 @@
+config GAMES_T2NATIVE
+    bool "T2 native Cortex-M7 original ROM intro and native gameplay prototype"
+    default n
+    depends on VIDEO_FB
+    help
+      Plays original Terminator 2 Genesis startup graphics captured offline
+      from the supplied ROM. Native Cortex-M7 code; no runtime ROM,
+      Musashi, or 68000 emulator.
+
+if GAMES_T2NATIVE
+config GAMES_T2NATIVE_PROGNAME
+    string "Program name"
+    default "t2native"
+config GAMES_T2NATIVE_PRIORITY
+    int "Task priority"
+    default 100
+config GAMES_T2NATIVE_STACKSIZE
+    int "Stack size"
+    default 8192
+endif

@@ -1,0 +1,1 @@
+V0.43.1: Fix native L8 fused scanline store width. Previous code used uint16_t *d = dst + x; which generated halfword stores at odd addresses and wrote 2 bytes per pixel. Now uses uint8_t *d = dst + x; for correct byte stores. Retains V0.43 native centered DMA2D approach. Hardware build/run not verified.

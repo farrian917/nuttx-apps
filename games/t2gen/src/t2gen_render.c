@@ -27,6 +27,9 @@
 #define OUT_W 1024u
 #define OUT_H 600u
 #define SRC_H 224u
+/* V0.43: native-sized L8 output, centered without CPU scaling. */
+#define T2GEN_NATIVE_CENTER 1
+#define STAGE_STRIDE 320u
 
 #ifdef CONFIG_STM32_DMA2D
 /* Kernel-owned DMA2D helper added by patches/stm32_dma2d_t2gen.patch. */
@@ -36,6 +39,10 @@ extern int stm32_dma2d_t2gen_copy_l8x2(const void *source, void *dest,
 static uint8_t *g_dma_lines;
 static bool g_dma_enabled;
 #endif
+
+/* V0.62: immutable zero sprite plane for scanlines without sprite pixels.
+ * Avoid clearing 2 * src_w bytes on every sprite-free scanline. */
+static const uint8_t g_v062_empty_sprite_row[320] = {0};
 
 /* 0=composite; 1=A; 2=B; 3=priority; 4=A+sprites; 5=B+sprites. */
 static unsigned g_view;
@@ -69,6 +76,54 @@ static uint8_t *g_tile_cache;
 static bool g_v038_cache_reported;
 static const char *g_v038_cache_region = "unallocated";
 
+/* V0.72: classify decoded tile rows once, at cache refill, never in
+ * the hot compositor. Bit n in each mask describes decoded row n.
+ * Metadata lives in ordinary RAM; the 128 KiB SRAM2 cache is unchanged.
+ */
+#if defined(CONFIG_GAMES_T2GEN_V072_ROW_METADATA) || defined(CONFIG_GAMES_T2GEN_V073_DIRECT_OPAQUE)
+static uint8_t g_v072_zero_mask[T2GEN_TILE_COUNT];
+static uint8_t g_v072_opaque_mask[T2GEN_TILE_COUNT];
+static uint32_t g_v072_both_zero, g_v072_nonzero, g_v072_decodes;
+static uint32_t g_v072_opaque_front;
+#ifdef CONFIG_GAMES_T2GEN_V073_DIRECT_OPAQUE
+static uint32_t g_v073_direct_spans, g_v073_direct_pixels;
+#endif
+static inline void t2gen_v072_classify(unsigned tile, const uint8_t *decoded)
+{
+  unsigned z = 0, o = 0;
+  for (unsigned r = 0; r < 8; ++r)
+    {
+      unsigned any = 0, all = 1;
+      for (unsigned k = 0; k < 8; ++k)
+        {
+          unsigned pixel = decoded[r * 8u + k];
+          any |= pixel;
+          all &= (pixel != 0u);
+        }
+      if (!any) z |= 1u << r;
+      if (all) o |= 1u << r;
+    }
+  g_v072_zero_mask[tile] = (uint8_t)z;
+  g_v072_opaque_mask[tile] = (uint8_t)o;
+  ++g_v072_decodes;
+}
+void t2gen_render_v072_report(unsigned long frame)
+{
+#ifdef CONFIG_GAMES_T2GEN_V073_DIRECT_OPAQUE
+  printf("T2GEN V0.73 DIRECT_OPAQUE: frame=%lu spans=%lu pixels=%lu\n",
+         frame, (unsigned long)g_v073_direct_spans,
+         (unsigned long)g_v073_direct_pixels);
+  g_v073_direct_spans = g_v073_direct_pixels = 0;
+#endif
+  printf("T2GEN V0.72 ROW_META: frame=%lu both_zero=%lu nonzero=%lu opaque_front=%lu decodes=%lu\n",
+         frame, (unsigned long)g_v072_both_zero,
+         (unsigned long)g_v072_nonzero,
+         (unsigned long)g_v072_opaque_front,
+         (unsigned long)g_v072_decodes);
+  g_v072_both_zero = g_v072_nonzero = 0;
+  g_v072_opaque_front = g_v072_decodes = 0;
+}
+#endif
 static uint32_t g_tile_stamp[T2GEN_TILE_COUNT];
 static uint32_t g_cache_reset_serial = UINT32_MAX;
 static uint32_t g_tile_hits;
@@ -134,6 +189,9 @@ static inline uint8_t tile_pixel(const struct t2gen_vdp_s *v,
                 out[row * 8u + col * 2u] = pair >> 4;
                 out[row * 8u + col * 2u + 1u] = pair & 15u;
               }
+#if defined(CONFIG_GAMES_T2GEN_V072_ROW_METADATA) || defined(CONFIG_GAMES_T2GEN_V073_DIRECT_OPAQUE)
+          t2gen_v072_classify(tile, out);
+#endif
           g_tile_stamp[tile] = v->tile_version[tile];
           ++g_tile_misses;
         }
@@ -167,6 +225,9 @@ static inline const uint8_t *tile_row_cached(const struct t2gen_vdp_s *v,
             out[row * 8u + col * 2u] = pair >> 4;
             out[row * 8u + col * 2u + 1u] = pair & 15u;
           }
+#if defined(CONFIG_GAMES_T2GEN_V072_ROW_METADATA) || defined(CONFIG_GAMES_T2GEN_V073_DIRECT_OPAQUE)
+      t2gen_v072_classify(tile, out);
+#endif
       g_tile_stamp[tile] = v->tile_version[tile];
       ++g_tile_misses;
     }
@@ -300,7 +361,20 @@ static void background_scanline_fullscroll(const struct t2gen_vdp_s *v,
     }
 }
 
-/* V0.34: fused full-scroll background + priority + L8 pair generation.
+/* V0.48c: immutable Genesis palette-index lookup, shared by every scanline.
+ * The previous implementation rebuilt this 64-byte table 224 times per
+ * rendered frame, even though palette-bank selection is independent of CRAM.
+ * Entry zero must stay transparent; nonzero entries are (bank << 4) | nibble.
+ */
+static const uint8_t g_v048c_palette_index[4][16] =
+{
+  {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+  {0, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31},
+  {0, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47},
+  {0, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63}
+};
+
+/* V0.43: fused full-scroll background + priority + native L8 generation.
  * One traversal, no 2x320 uint16_t plane scanline buffers and no separate
  * background-to-mixer pass. The slow path is retained for window/column
  * scrolling and diagnostic views. Each plane's tile row is resolved only
@@ -312,7 +386,8 @@ static void fused_scanline_fullscroll(const struct t2gen_vdp_s *v,
                                       int16_t vs_a, int16_t vs_b,
                                       const uint8_t *sprite_lo,
                                       const uint8_t *sprite_hi,
-                                      uint16_t *dst,
+                                      bool scanline_has_sprites,
+                                      uint8_t *dst,
                                       unsigned *nonzero,
                                       unsigned *sprite_pixels)
 {
@@ -325,6 +400,7 @@ static void fused_scanline_fullscroll(const struct t2gen_vdp_s *v,
   const uint32_t bbase = (((uint32_t)(v->reg[4] & 7u) << 13) & 65535u) +
                          ((yb >> 3) * cols << 1);
   const uint8_t backdrop = v->reg[7] & 0x3fu;
+  /* V0.48c: reuse the compile-time palette-index table. */
   unsigned nz = 0, sp = 0;
   unsigned x = 0;
   while (x < width)
@@ -337,8 +413,8 @@ static void fused_scanline_fullscroll(const struct t2gen_vdp_s *v,
       if (n > width - x) n = width - x;
       uint16_t ae = vrword(v, abase + ((xa >> 3) << 1));
       uint16_t be = vrword(v, bbase + ((xb >> 3) << 1));
-      const uint8_t apal = (uint8_t)(((ae >> 13) & 3u) << 4);
-      const uint8_t bpal = (uint8_t)(((be >> 13) & 3u) << 4);
+      const uint8_t *alut = g_v048c_palette_index[(ae >> 13) & 3u];
+      const uint8_t *blut = g_v048c_palette_index[(be >> 13) & 3u];
       const bool apri = (ae & 0x8000u) != 0;
       const bool bpri = (be & 0x8000u) != 0;
       const uint8_t *arow = g_cache_ready ? tile_row_cached(v, ae, ya) : NULL;
@@ -354,7 +430,8 @@ static void fused_scanline_fullscroll(const struct t2gen_vdp_s *v,
       const uint8_t *bp = brow ? brow + ((be & 0x0800u) ? 7u-bx : bx) : NULL;
       const uint8_t *sl = sprite_lo + x;
       const uint8_t *sh = sprite_hi + x;
-      uint16_t *d = dst + x;
+      /* Native L8 staging is byte-addressed: do not use 16-bit stores. */
+      uint8_t *d = dst + x;
       /* Keep the original uncached fallback, including its nibble
        * extraction semantics, for low-memory configurations. */
       if (!ap || !bp)
@@ -363,8 +440,8 @@ static void fused_scanline_fullscroll(const struct t2gen_vdp_s *v,
             {
               uint8_t ac = (uint8_t)(tile_pixel(v, ae, xa+k, ya) & 15u);
               uint8_t bc = (uint8_t)(tile_pixel(v, be, xb+k, yb) & 15u);
-              uint8_t a = ac ? (uint8_t)(apal | ac) : 0;
-              uint8_t b = bc ? (uint8_t)(bpal | bc) : 0;
+              uint8_t a = alut[ac];
+              uint8_t b = blut[bc];
               uint8_t slo = sl[k], shi = sh[k];
               uint8_t color = shi ? shi :
                               (a && apri) ? a :
@@ -372,24 +449,210 @@ static void fused_scanline_fullscroll(const struct t2gen_vdp_s *v,
                               slo ? slo : a ? a : b ? b : backdrop;
               nz += color != 0u;
               sp += slo != 0u || shi != 0u;
-              d[k] = (uint16_t)color * 0x0101u;
+              d[k] = color;
             }
         }
       else
         {
+          /* V0.44: most background spans contain no sprite pixels.
+           * Test once per span and avoid sprite loads and priority mixing
+           * in the hot loop when both sprite layers are empty. */
+          unsigned sprite_any = 0u;
+          if (scanline_has_sprites)
+            for (unsigned k = 0; k < n; ++k)
+              sprite_any |= (unsigned)(sl[k] | sh[k]);
+          if (sprite_any == 0u)
+            {
+#if defined(CONFIG_GAMES_T2GEN_V072_ROW_METADATA) || defined(CONFIG_GAMES_T2GEN_V073_DIRECT_OPAQUE)
+              /* Masks were computed during cache refill. Y-flip is
+               * already resolved in tile_row_cached; x-flip does not
+               * affect whether an entire row is empty. */
+              unsigned atile = ae & 0x07ffu, btile = be & 0x07ffu;
+              unsigned ary = (ae & 0x1000u) ? (7u - (ya & 7u)) : (ya & 7u);
+              unsigned bry = (be & 0x1000u) ? (7u - (yb & 7u)) : (yb & 7u);
+              if ((g_v072_zero_mask[atile] & (1u << ary)) &&
+                  (g_v072_zero_mask[btile] & (1u << bry)))
+                {
+                  ++g_v072_both_zero;
+                  memset(d, backdrop, n);
+                  if (backdrop != 0u) nz += n;
+                  x += n;
+                  continue;
+                }
+              ++g_v072_nonzero;
+              /* Count opportunities for a future opaque-front path.
+               * Do not change the pixel compositor in this release. */
+              if ((bpri && !apri &&
+                   (g_v072_opaque_mask[btile] & (1u << bry))) ||
+                  (!(bpri && !apri) &&
+                   (g_v072_opaque_mask[atile] & (1u << ary))))
+                {
+                  ++g_v072_opaque_front;
+#ifdef CONFIG_GAMES_T2GEN_V073_DIRECT_OPAQUE
+                  /* Both pointers are already resolved to the decoded tile
+                   * rows.  Only enter when the selected front row contains
+                   * no transparent pixels.  The selected front plane is B
+                   * exclusively when B has priority and A does not; this
+                   * matches the existing sprite-free compositor ordering.
+                   * A fully opaque front pixel masks the rear plane. */
+                  const bool bfront = bpri && !apri;
+                  const uint8_t *front = bfront ? bp : ap;
+                  const uint8_t *lut = bfront ? blut : alut;
+                  const int step = bfront ? bstep : astep;
+                  for (unsigned k = 0; k < n; ++k)
+                    {
+                      uint8_t color = lut[*front];
+                      d[k] = color;
+                      nz += color != 0u;
+                      front += step;
+                    }
+                  ++g_v073_direct_spans;
+                  g_v073_direct_pixels += n;
+                  x += n;
+                  continue;
+#endif
+                }
+#else
+              /* V0.64: staged zero-row rejection. The first 32-bit
+               * word of each decoded row usually rejects opaque tiles;
+               * only then read the remaining words. No false-positive
+               * backdrop fill is possible: all 16 bytes must be zero.
+               * memcpy avoids alignment assumptions on decoded rows. */
+              uint32_t az0, bz0;
+              memcpy(&az0, arow, sizeof(az0));
+              memcpy(&bz0, brow, sizeof(bz0));
+              if ((az0 | bz0) == 0u)
+                {
+                  uint32_t az1, bz1;
+                  memcpy(&az1, arow + 4, sizeof(az1));
+                  memcpy(&bz1, brow + 4, sizeof(bz1));
+                  if ((az1 | bz1) == 0u)
+                    {
+                      memset(d, backdrop, n);
+                      if (backdrop != 0u) nz += n;
+                      x += n;
+                      continue;
+                    }
+                }
+#endif
+              /* V0.77: integrated forward-only four-pixel packed compositor.
+               * A zero byte in the front word selects the rear byte.
+               * A nonzero byte selects the front byte. The zero-byte
+               * detection runs in parallel on four decoded pixels.
+               * Use memcpy for alignment/strict-aliasing safety.
+               * Keep the original per-pixel compositor for hflip or
+               * short tails. Palette indices are applied AFTER selecting
+               * the winning plane, retaining per-plane palette banks.
+               */
+              if (astep == 1 && bstep == 1 && n >= 4u)
+                {
+                  const bool bfront = bpri && !apri;
+                  const uint8_t *front = bfront ? bp : ap;
+                  const uint8_t *rear = bfront ? ap : bp;
+                  const uint8_t *flut = bfront ? blut : alut;
+                  const uint8_t *rlut = bfront ? alut : blut;
+                  unsigned k = 0u;
+                  for (; k + 4u <= n; k += 4u)
+                    {
+                      uint32_t fw, rw;
+                      memcpy(&fw, front + k, sizeof(fw));
+                      memcpy(&rw, rear + k, sizeof(rw));
+                      /* Each byte is a decoded 0..15 pixel.  Construct
+                       * four independent 0xFF/0x00 select masks without
+                       * relying on the borrow-sensitive zero-byte trick. */
+                      uint32_t fm = 0u;
+                      fm |= (uint32_t)-(int32_t)((fw & 0x000000ffu) != 0u) & 0x000000ffu;
+                      fm |= (uint32_t)-(int32_t)((fw & 0x0000ff00u) != 0u) & 0x0000ff00u;
+                      fm |= (uint32_t)-(int32_t)((fw & 0x00ff0000u) != 0u) & 0x00ff0000u;
+                      fm |= (uint32_t)-(int32_t)((fw & 0xff000000u) != 0u) & 0xff000000u;
+                      uint32_t selected = (fw & fm) | (rw & ~fm);
+                      /* Palette choice remains per pixel because each
+                       * plane has its own CRAM palette selection. */
+                      for (unsigned j = 0; j < 4u; ++j)
+                        {
+                          unsigned shift = j * 8u;
+                          uint8_t pix = (uint8_t)(selected >> shift);
+                          uint8_t color = (fm & (0xffu << shift)) ?
+                                          flut[pix] : (pix ? rlut[pix] : backdrop);
+                          d[k + j] = color;
+                          nz += color != 0u;
+                        }
+                    }
+                  /* Scalar tail: same plane order and transparency. */
+                  for (; k < n; ++k)
+                    {
+                      uint8_t fc = front[k];
+                      uint8_t rc = rear[k];
+                      uint8_t color = fc ? flut[fc] :
+                                      rc ? rlut[rc] : backdrop;
+                      d[k] = color;
+                      nz += color != 0u;
+                    }
+                  x += n;
+                  continue;
+                }
+              /* V0.53: process four pixels per iteration, retaining the
+               * exact demand-driven rear-plane reads and priority ordering.
+               * The tail handles spans of length 1..3. */
+              unsigned k = 0u;
+#define T2GEN_V053_B_FRONT_PIXEL() do { \
+                uint8_t bc = *bp; \
+                uint8_t color; \
+                if (bc != 0u) color = blut[bc]; \
+                else { uint8_t ac = *ap; \
+                       color = ac ? alut[ac] : backdrop; } \
+                d[k++] = color; nz += color != 0u; \
+                ap += astep; bp += bstep; \
+              } while (0)
+#define T2GEN_V053_A_FRONT_PIXEL() do { \
+                uint8_t ac = *ap; \
+                uint8_t color; \
+                if (ac != 0u) color = alut[ac]; \
+                else { uint8_t bc = *bp; \
+                       color = bc ? blut[bc] : backdrop; } \
+                d[k++] = color; nz += color != 0u; \
+                ap += astep; bp += bstep; \
+              } while (0)
+              if (bpri && !apri)
+                {
+                  for (; k + 4u <= n; )
+                    {
+                      T2GEN_V053_B_FRONT_PIXEL();
+                      T2GEN_V053_B_FRONT_PIXEL();
+                      T2GEN_V053_B_FRONT_PIXEL();
+                      T2GEN_V053_B_FRONT_PIXEL();
+                    }
+                  while (k < n) T2GEN_V053_B_FRONT_PIXEL();
+                }
+              else
+                {
+                  for (; k + 4u <= n; )
+                    {
+                      T2GEN_V053_A_FRONT_PIXEL();
+                      T2GEN_V053_A_FRONT_PIXEL();
+                      T2GEN_V053_A_FRONT_PIXEL();
+                      T2GEN_V053_A_FRONT_PIXEL();
+                    }
+                  while (k < n) T2GEN_V053_A_FRONT_PIXEL();
+                }
+#undef T2GEN_V053_A_FRONT_PIXEL
+#undef T2GEN_V053_B_FRONT_PIXEL
+              x += n;
+              continue;
+            }
           /* Four priority combinations. The compiler can eliminate all
            * priority checks from the innermost pixel loop. */
 #define T2GEN_FUSED_SPAN(PRIORITY_EXPR) \
           do { \
             for (unsigned k = 0; k < n; ++k) { \
               uint8_t ac = *ap, bc = *bp; \
-              uint8_t a = ac ? (uint8_t)(apal | ac) : 0u; \
-              uint8_t b = bc ? (uint8_t)(bpal | bc) : 0u; \
+              uint8_t a = alut[ac]; \
+              uint8_t b = blut[bc]; \
               uint8_t slo = sl[k], shi = sh[k]; \
               uint8_t color = shi ? shi : (PRIORITY_EXPR); \
               nz += color != 0u; \
               sp += (slo | shi) != 0u; \
-              d[k] = (uint16_t)color * 0x0101u; \
+              d[k] = color; \
               ap += astep; bp += bstep; \
             } \
           } while (0)
@@ -865,6 +1128,24 @@ int t2gen_render_benchmark(const char *device, unsigned repeats)
   return 0;
 }
 
+/* V0.48a: two LTDC scanout surfaces. DMA2D remains synchronous in this
+ * safety-first release; the asynchronous strip engine is not enabled yet. */
+static uint8_t *g_v048_fb[2];
+static uint8_t *g_v048_draw_fb;
+static unsigned g_v048_back = 1u;
+static bool g_v048_double;
+static bool g_v048_reported;
+/* V0.48b: defer synchronization until just before the old front buffer
+ * is reused. The current NuttX WAITFORVSYNC ioctl itself initiates a
+ * fresh VBlank reload; this is a diagnostic scheduling experiment. */
+static bool g_v048_pan_pending;
+static uint64_t g_v048_pan_us;
+static uint64_t g_v048_wait_us;
+static uint64_t g_v048_wait_max_us;
+static unsigned g_v048_wait_count;
+static unsigned g_v048_pan_count;
+
+
 static uint16_t g_last_cram[64];
 static bool g_palette_valid;
 static uint8_t g_red[64], g_green[64], g_blue[64];
@@ -891,7 +1172,7 @@ static int framebuffer_init(const char *device)
    * This remains board-specific; a dedicated SDRAM heap is preferable.
    */
   {
-    const size_t staging_bytes = 640u * SRC_H;
+    const size_t staging_bytes = STAGE_STRIDE * SRC_H;
     const size_t reserve_bytes = 512u * 1024u;
     const uintptr_t sdram_base = 0xc0000000u;
     const uintptr_t sdram_end = 0xc2000000u;
@@ -920,6 +1201,28 @@ static int framebuffer_init(const char *device)
       }
   }
 #endif
+  g_v048_fb[0] = (uint8_t *)g_pi.fbmem;
+  g_v048_fb[1] = NULL;
+  g_v048_draw_fb = g_v048_fb[0];
+#ifdef CONFIG_STM32_LTDC_FB_DOUBLE_BUFFER
+  /* The driver reserves two consecutive L8 scanout surfaces. Never assume
+   * that the second surface exists when fblen reports only one frame. */
+  if (g_pi.stride <= SIZE_MAX / OUT_H &&
+      g_pi.fblen >= (size_t)g_pi.stride * OUT_H * 2u)
+    {
+      g_v048_fb[1] = g_v048_fb[0] + g_pi.stride * OUT_H;
+      /* V0.48c.1: disable unsafe pan path; preserve known-good DMA2D. */
+      g_v048_double = false;
+    }
+  else
+    {
+      printf("T2GEN V0.48a: double buffer unavailable fblen=%lu\n",
+             (unsigned long)g_pi.fblen);
+    }
+#endif
+  printf("T2GEN V0.48c.1 SAFE DISPLAY: double=%u front=%p back=%p stride=%lu\n",
+         (unsigned)g_v048_double, g_v048_fb[0], g_v048_fb[1],
+         (unsigned long)g_pi.stride);
   printf("T2GEN V9.8.2: framebuffer ready fd=%d fb=%p stride=%lu DMA=%u\n",
          g_fd, g_pi.fbmem, (unsigned long)g_pi.stride,
 #ifdef CONFIG_STM32_DMA2D
@@ -932,8 +1235,16 @@ static int framebuffer_init(const char *device)
   for (unsigned y=0; y<OUT_H; ++y)
     memset((uint8_t *)g_pi.fbmem + y*g_pi.stride, 0, OUT_W);
 #ifdef CONFIG_ARMV7M_DCACHE
+  if (g_v048_double)
+    {
+      for (unsigned y = 0; y < OUT_H; ++y)
+        memset(g_v048_fb[1] + y*g_pi.stride, 0, OUT_W);
+    }
   up_clean_dcache((uintptr_t)g_pi.fbmem,
                   (uintptr_t)g_pi.fbmem + g_pi.stride*OUT_H);
+  if (g_v048_double)
+    up_clean_dcache((uintptr_t)g_v048_fb[1],
+                    (uintptr_t)g_v048_fb[1] + g_pi.stride*OUT_H);
 #endif
   return 0;
 fail:
@@ -956,8 +1267,7 @@ static void sprite_scanline(const struct t2gen_vdp_s *v,
                             unsigned y, unsigned width,
                             uint8_t low[320], uint8_t high[320])
 {
-  memset(low, 0, 320);
-  memset(high, 0, 320);
+  /* V0.61: caller clears only the active source width once. */
   for (unsigned i = 0; i < count; ++i)
     {
       const struct sprite_s *sp = &sprites[indices[i]];
@@ -1019,7 +1329,7 @@ int t2gen_render_snapshot(const char *device)
   struct sprite_s sprites[80];
   unsigned h40=(v->reg[12]&1u)!=0u;
   unsigned src_w=h40?320u:256u;
-  unsigned ox=(OUT_W-src_w*2u)/2u, oy=(OUT_H-SRC_H*2u)/2u;
+  unsigned ox=(OUT_W-src_w)/2u, oy=(OUT_H-SRC_H)/2u;
   unsigned cols=plane_size(v->reg[16]&3u);
   unsigned rows=plane_size((v->reg[16]>>4)&3u);
   unsigned nsp=read_sprites(v,sprites,h40?80u:64u,h40);
@@ -1053,6 +1363,28 @@ int t2gen_render_snapshot(const char *device)
              g_render_attempts, errno);
       return -1;
     }
+#if defined(CONFIG_STM32_LTDC_FB_DOUBLE_BUFFER) && defined(CONFIG_FB_SYNC)
+  /* Do not touch the previous front buffer until the pending VBlank
+   * transition has been confirmed. The 68000 has run between these calls. */
+  if (g_v048_double && g_v048_pan_pending)
+    {
+      uint64_t wait_start = timestamp_us();
+      int wait_rc = ioctl(g_fd, FBIO_WAITFORVSYNC, 0);
+      uint64_t elapsed = timestamp_us() - wait_start;
+      g_v048_wait_us += elapsed;
+      if (elapsed > g_v048_wait_max_us)
+        g_v048_wait_max_us = elapsed;
+      ++g_v048_wait_count;
+      if (wait_rc < 0)
+        {
+          printf("T2GEN V0.48b: deferred VSYNC failed errno=%d\n", errno);
+          return -1;
+        }
+      g_v048_pan_pending = false;
+    }
+#endif
+  /* Draw exclusively into the buffer not currently scanned by LTDC. */
+  g_v048_draw_fb = g_v048_double ? g_v048_fb[g_v048_back] : g_v048_fb[0];
   uint64_t compose_start = timestamp_us();
   tile_cache_begin(v);
   if (g_render_attempts <= 1u)
@@ -1061,8 +1393,8 @@ int t2gen_render_snapshot(const char *device)
   /* H32/H40 mode transitions leave the former centered rectangle behind. */
   if (g_last_w && g_last_w!=src_w)
     {
-      for (unsigned y=oy; y<oy+SRC_H*2u; ++y)
-        memset((uint8_t *)g_pi.fbmem+y*g_pi.stride,0,OUT_W);
+      for (unsigned y=oy; y<oy+SRC_H; ++y)
+        memset(g_v048_draw_fb+y*g_pi.stride,0,OUT_W);
     }
   g_last_w=src_w;
      if (!g_palette_valid || memcmp(g_last_cram,v->cram,sizeof(g_last_cram)) != 0)
@@ -1099,19 +1431,29 @@ int t2gen_render_snapshot(const char *device)
             if (count >= (h40?20u:16u)) break;
             visible[count++]=(uint8_t)i;
           }
-      uint8_t sprite_lo[320], sprite_hi[320];
-      memset(sprite_lo,0,src_w);
-      memset(sprite_hi,0,src_w);
-      if (g_view == 0u || g_view == 4u || g_view == 5u)
-        sprite_scanline(v, sprites, visible, count, y, src_w,
-                        sprite_lo, sprite_hi);
+      /* V0.62: only clear writable sprite planes when rasterization is
+       * required. All other scanlines share read-only zero planes. */
+      uint8_t sprite_lo_storage[320], sprite_hi_storage[320];
+      const uint8_t *sprite_lo = g_v062_empty_sprite_row;
+      const uint8_t *sprite_hi = g_v062_empty_sprite_row;
+      const bool draw_sprites = count != 0u &&
+          (g_view == 0u || g_view == 4u || g_view == 5u);
+      if (draw_sprites)
+        {
+          memset(sprite_lo_storage, 0, src_w);
+          memset(sprite_hi_storage, 0, src_w);
+          sprite_scanline(v, sprites, visible, count, y, src_w,
+                          sprite_lo_storage, sprite_hi_storage);
+          sprite_lo = sprite_lo_storage;
+          sprite_hi = sprite_hi_storage;
+        }
       g_v18_sprite_us += timestamp_us() - v18_t;
       v18_t = timestamp_us();
       int hs_a=hscroll(v,0,y), hs_b=hscroll(v,1,y);
-      uint8_t *r0=(uint8_t *)g_pi.fbmem+(oy+2u*y)*g_pi.stride+ox;
+      uint8_t *r0=g_v048_draw_fb+(oy+y)*g_pi.stride+ox;
       uint8_t *r1=r0+g_pi.stride;
 #ifdef CONFIG_STM32_DMA2D
-      if (g_dma_enabled) r0 = g_dma_lines + y * 640u;
+      if (g_dma_enabled) r0 = g_dma_lines + y * STAGE_STRIDE;
 #endif
       /* V0.34: fuse both background planes with priority mixing and L8
        * horizontal duplication. Window/column scroll and debug views use
@@ -1124,15 +1466,14 @@ int t2gen_render_snapshot(const char *device)
           bool horizontal_win = (v->reg[17] & 0x80u) ? hx < src_w : hx != 0u;
           if (!full_win && !horizontal_win)
             {
-              uint16_t *dst = (uint16_t *)(void *)r0;
+              uint8_t *dst = r0;
               fused_scanline_fullscroll(v, y, src_w, cols, rows,
                                         hs_a, hs_b, scroll_a[0], scroll_b[0],
-                                        sprite_lo, sprite_hi, dst,
+                                        sprite_lo, sprite_hi, draw_sprites, dst,
                                         &nonzero, &sprite_pixels);
-#ifdef CONFIG_STM32_DMA2D
-              if (!g_dma_enabled)
-#endif
-                memcpy(r1, r0, src_w * 2u);
+              /* V0.44: record fused composition as background time.
+               * Previous conditional accidentally skipped profiling
+               * whenever DMA2D was enabled. */
               g_v18_bg_us += timestamp_us() - v18_t;
               continue;
             }
@@ -1184,8 +1525,7 @@ int t2gen_render_snapshot(const char *device)
        * even-aligned pixel starts. Each source pixel becomes one packed
        * 16-bit store (two identical L8 palette indices). This avoids
        * separate byte stores and repeated 2*x addressing. */
-      uint16_t *restrict dst0 = (uint16_t *)(void *)r0;
-      uint16_t *restrict dst1 = (uint16_t *)(void *)r1;
+      uint8_t *restrict dst0 = r0;
       const uint8_t backdrop = v->reg[7] & 0x3fu;
       if (g_view == 0u)
         {
@@ -1210,12 +1550,7 @@ int t2gen_render_snapshot(const char *device)
               else color = backdrop;
               nonzero += (color != 0u);
               sprite_pixels += (slo != 0u || shi != 0u);
-              uint16_t pair = (uint16_t)color * 0x0101u;
-              dst0[x] = pair;
-#ifdef CONFIG_STM32_DMA2D
-              if (!g_dma_enabled)
-#endif
-                dst1[x] = pair;
+              dst0[x] = color;
             }
           g_v18_mix_us += timestamp_us() - v18_t;
           continue;
@@ -1246,12 +1581,7 @@ int t2gen_render_snapshot(const char *device)
               if (slo||shi) ++sprite_pixels;
             }
           if (color) ++nonzero;
-          uint16_t pair = (uint16_t)color * 0x0101u;
-          dst0[x] = pair;
-#ifdef CONFIG_STM32_DMA2D
-          if (!g_dma_enabled)
-#endif
-            dst1[x] = pair;
+          dst0[x] = color;
         }
       g_v18_mix_us += timestamp_us() - v18_t;
     }
@@ -1262,18 +1592,17 @@ int t2gen_render_snapshot(const char *device)
       uint64_t dma_start = timestamp_us();
 #ifdef CONFIG_ARMV7M_DCACHE
       up_clean_dcache((uintptr_t)g_dma_lines,
-                      (uintptr_t)g_dma_lines + 640u * SRC_H);
+                      (uintptr_t)g_dma_lines + STAGE_STRIDE * SRC_H);
 #endif
       g_v18_dma_cache_us += timestamp_us() - dma_start;
       uint64_t v18_copy_start = timestamp_us();
-      uint8_t *dest = (uint8_t *)g_pi.fbmem + oy*g_pi.stride + ox;
-      /* Copy packed pairs of L8 pixels as raw RGB565 words. The DMA2D
-       * memory-to-memory engine does NOT interpret RGB565 color values. */
+      uint8_t *dest = g_v048_draw_fb + oy*g_pi.stride + ox;
+      /* DMA2D helper copies byte pairs as RGB565 words without conversion.
+       * One native-resolution 320/256 x 224 transfer, no scaling.
+       * Source and destination offsets/strides are even. */
       int rc0 = stm32_dma2d_t2gen_copy_l8x2(g_dma_lines, dest,
-                         640u, g_pi.stride*2u, src_w*2u, SRC_H);
-      int rc1 = rc0 == 0 ?
-        stm32_dma2d_t2gen_copy_l8x2(g_dma_lines, dest+g_pi.stride,
-                         640u, g_pi.stride*2u, src_w*2u, SRC_H) : -1;
+                         STAGE_STRIDE, g_pi.stride, src_w, SRC_H);
+      int rc1 = 0;
       g_v18_dma_copy_us += timestamp_us() - v18_copy_start;
       uint32_t dma_elapsed = (uint32_t)(timestamp_us() - dma_start);
       g_transfer_us += dma_elapsed;
@@ -1299,15 +1628,53 @@ int t2gen_render_snapshot(const char *device)
 #endif
 #ifdef CONFIG_ARMV7M_DCACHE
   /* Clean active rows only, including cache-line-aligned surrounding bytes. */
-  uintptr_t begin=(uintptr_t)g_pi.fbmem+oy*g_pi.stride+ox;
-  uintptr_t end=(uintptr_t)g_pi.fbmem+(oy+SRC_H*2u-1u)*g_pi.stride+ox+src_w*2u;
+  uintptr_t begin=(uintptr_t)g_v048_draw_fb+oy*g_pi.stride+ox;
+  uintptr_t end=(uintptr_t)g_v048_draw_fb+(oy+SRC_H-1u)*g_pi.stride+ox+src_w;
   /* NuttX cache maintenance accepts an address range; align conservatively. */
 #ifdef CONFIG_STM32_DMA2D
   if (!g_dma_enabled)
 #endif
     up_clean_dcache(begin & ~(uintptr_t)31u,(end+31u)&~(uintptr_t)31u);
 #endif
+#ifdef CONFIG_STM32_LTDC_FB_DOUBLE_BUFFER
+  if (g_v048_double)
+    {
+      /* Submit pan now; defer waiting until the next render snapshot. */
+      struct fb_planeinfo_s pan = g_pi;
+      uint64_t pan_start = timestamp_us();
+      int rc;
+      pan.fbmem = g_v048_draw_fb;
+      pan.xoffset = 0;
+      pan.yoffset = 0;
+      rc = ioctl(g_fd, FBIOPAN_DISPLAY, (unsigned long)(uintptr_t)&pan);
+      g_v048_pan_us += timestamp_us() - pan_start;
+      ++g_v048_pan_count;
+      if (rc < 0)
+        {
+          printf("T2GEN V0.48b: LTDC pan failed errno=%d\n", errno);
+          return -1;
+        }
+      g_v048_pan_pending = true;
+      g_v048_back ^= 1u;
+      if (!g_v048_reported)
+        {
+          printf("T2GEN V0.48a: LTDC double buffer active\n");
+          g_v048_reported = true;
+        }
+    }
+#endif
   ++g_render_calls;
+  if ((g_render_calls % 100u) == 0u && g_v048_double)
+    {
+      printf("T2GEN V0.48b VSYNC: renders=%u pans=%u waits=%u "
+             "pan_avg_us=%llu wait_avg_us=%llu wait_max_us=%llu\n",
+             g_render_calls, g_v048_pan_count, g_v048_wait_count,
+             (unsigned long long)(g_v048_pan_us /
+               (g_v048_pan_count ? g_v048_pan_count : 1u)),
+             (unsigned long long)(g_v048_wait_us /
+               (g_v048_wait_count ? g_v048_wait_count : 1u)),
+             (unsigned long long)g_v048_wait_max_us);
+    }
   if (g_render_calls==1u || (g_render_calls%512u)==0u)
     printf("T2GEN V9.1: render=%u mode=%s view=%u sprites=%u "
            "sprite_pixels=%u nonzero=%u plane=%ux%u "

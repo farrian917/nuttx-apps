@@ -6,6 +6,25 @@ config GAMES_T2GEN
         This first milestone is not yet a playable emulator.
 
 if GAMES_T2GEN
+config GAMES_T2GEN_V073_DIRECT_OPAQUE
+    bool "V0.73 direct opaque-front tile span compositor (experimental)"
+    default n
+    depends on !GAMES_T2GEN_V072_ROW_METADATA
+    help
+      Precompute decoded tile-row opacity metadata on cache refill.
+      For sprite-free spans with a fully opaque selected front row,
+      write only the front plane and skip rear-plane pixel reads.
+      Retains V0.64 staged zero-row and mixed-pixel fallbacks.
+      Reports fast-path spans and pixels every 300 emulated frames.
+      Disable to benchmark the unmodified V0.64-style path.
+config GAMES_T2GEN_V072_ROW_METADATA
+    bool "V0.72 cache decoded tile-row transparency metadata (experimental)"
+    default n
+    help
+      Compute transparent/opaque row bitmasks only on tile-cache misses.
+      Use the zero-row masks for the background backdrop fast path.
+      Count opaque opportunities without changing mixed-pixel blending.
+      Toggle off for a same-configuration A/B benchmark.
 config GAMES_T2GEN_PROGNAME
     string "Program name"
     default "t2gen"
@@ -299,3 +318,19 @@ config GAMES_T2GEN_V0389_DIAGNOSTIC_PROFILING
       per-instruction utilization counters for diagnosis. Leave disabled
       for meaningful FPS measurements. The paired-dispatch counters
       remain available independently.
+
+config GAMES_T2GEN_V040_NO_XBOX
+    bool "V0.40 benchmark without Xbox controller"
+    default y
+    depends on GAMES_T2GEN_MUSASHI
+    help
+      Do not open or poll /dev/xboxa. Controller state remains idle.
+
+config GAMES_T2GEN_V040_RENDER_DIVIDER
+    int "V0.40 render one out of N emulated frames (3=original)"
+    default 3
+    range 1 8
+    depends on GAMES_T2GEN_MUSASHI
+    help
+      Set 3 for identical video cadence to V0.39. Larger values trade
+      display FPS for higher CPU emulation FPS; use 4 only for A/B tests.

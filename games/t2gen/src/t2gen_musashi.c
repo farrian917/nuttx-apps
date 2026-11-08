@@ -10,6 +10,11 @@
 #include <string.h>
 #include "m68k.h"
 #include "t2gen_musashi.h"
+/* Kconfig int may be absent from an existing .config until menuconfig. */
+#ifndef CONFIG_GAMES_T2GEN_V040_RENDER_DIVIDER
+#  define CONFIG_GAMES_T2GEN_V040_RENDER_DIVIDER 3
+#endif
+
 #if defined(CONFIG_GAMES_T2GEN_V08_NATIVE_SYNC_CHECK) || defined(CONFIG_GAMES_T2GEN_V010_NATIVE_CMP_EXEC)
 #include "t2gen_native_sync.h"
 #endif
@@ -57,6 +62,12 @@ static uint32_t g_xbox_errors;
 
 static void xbox_open(void)
 {
+#ifdef T2GEN_V040_NO_XBOX
+  g_xbox_fd = -1;
+  g_buttons = 0;
+  printf("T2GEN V0.40: Xbox disabled for benchmark\n");
+  return;
+#endif
   g_xbox_fd = open("/dev/xboxa", O_RDONLY | O_NONBLOCK);
   if (g_xbox_fd < 0)
     printf("T2GEN V9.7: /dev/xboxa unavailable errno=%d (pad idle)\n", errno);
@@ -66,6 +77,9 @@ static void xbox_open(void)
 
 static void xbox_poll(void)
 {
+#ifdef T2GEN_V040_NO_XBOX
+  return;
+#endif
   struct xbox_controller_buttonstate_s pad;
   ssize_t n;
   uint8_t buttons = 0;
@@ -1183,8 +1197,7 @@ m68k_pulse_reset();
   uint64_t total_cycles = 0;
   uint64_t next_line_cycle = cycles_per_line;
   uint32_t line = 0;
-  uint32_t last_pc = 0xffffffffu;
-  uint32_t repeated_pc = 0;
+
   bool irq_asserted = false;
   unsigned slice = 0;
   unsigned v029_exit_hold = 0;
@@ -1199,7 +1212,7 @@ m68k_pulse_reset();
   struct timeval t0,t1, cpu_t0;
   uint32_t render_max_us=0;
   if (g_v029_gameplay)
-    printf("T2GEN V0.29 GAMEPLAY: framebuffer=%s, continuous execution, render every 3 frames; hold START+A+B+C for 2 seconds to quit\n", fbdev);
+    printf("T2GEN V0.29 GAMEPLAY: framebuffer=%s, continuous execution, render every %d frames; hold START+A+B+C for 2 seconds to quit\n", fbdev, CONFIG_GAMES_T2GEN_V040_RENDER_DIVIDER);
   else
     printf("T2GEN V9.2: execution_limit=%lu cycles line_cycles=%lu (~%lu frames)\n",
            (unsigned long)cycle_limit, (unsigned long)cycles_per_line,
@@ -1207,9 +1220,8 @@ m68k_pulse_reset();
   t2gen_vdp_set_scanline(0);
   while (total_cycles < cycle_limit)
     {
-      uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC);
 #ifdef CONFIG_GAMES_T2GEN_V04_PC_PROFILE
-      t2gen_v04_pc_sample(pc);
+      t2gen_v04_pc_sample(m68k_get_reg(NULL, M68K_REG_PC));
 #endif
       /* Time batches instead of each 488-cycle slice. */
       if ((slice & 255u)==0u) gettimeofday(&cpu_t0,NULL);
@@ -1223,21 +1235,10 @@ m68k_pulse_reset();
       if (done <= 0)
         {
           printf("T2GEN V7: CPU stalled slice=%u done=%d PC=%06lx\n",
-                 slice, done, (unsigned long)pc);
+                 slice, done, (unsigned long)m68k_get_reg(NULL, M68K_REG_PC));
           break;
         }
       total_cycles += (uint32_t)done;
-      if (pc == last_pc)
-        repeated_pc++;
-      else
-        repeated_pc = 0;
-      last_pc = pc;
-      if (0 && repeated_pc == 40u)
-        {
-          printf("T2GEN V7: repeated PC=%06lx opcode=%04x (sampled at slice boundaries)\n",
-                 (unsigned long)pc,
-                 (unsigned)m68k_read_disassembler_16(pc));
-        }
       while (total_cycles >= next_line_cycle)
         {
           line = (line + 1u) % lines_per_frame;
@@ -1325,6 +1326,9 @@ m68k_pulse_reset();
                       }
                   }
 #endif
+#if defined(CONFIG_GAMES_T2GEN_V072_ROW_METADATA) || defined(CONFIG_GAMES_T2GEN_V073_DIRECT_OPAQUE)
+                  t2gen_render_v072_report((unsigned long)g_pad_frame);
+#endif
                   t2gen_v0384_table_check((unsigned long)g_pad_frame);
                   t2gen_v0387_report((unsigned long)g_pad_frame);
                   t2gen_v0388_report((unsigned long)g_pad_frame);
@@ -1335,7 +1339,7 @@ m68k_pulse_reset();
            * animation observation. No wall-clock pacing yet.
            */
           if (line == 224u && fbdev != NULL &&
-              (t2gen_vdp_state()->frames % 3u) == 0u)
+              (t2gen_vdp_state()->frames % CONFIG_GAMES_T2GEN_V040_RENDER_DIVIDER) == 0u)
             {
               gettimeofday(&t0,NULL);
               int render_result=t2gen_render_snapshot(fbdev);
@@ -1368,10 +1372,6 @@ m68k_pulse_reset();
             }
           next_line_cycle += cycles_per_line;
         }
-      if (0 && (slice % 5000u) == 0u &&
-          (pc == 0x00a12eu || pc == 0x00a0e4u ||
-           pc == 0x00a0eau || pc == 0x006126u))
-        v85_loop_state(pc,total_cycles,slice);
       if ((slice % 50000u) == 0u || total_cycles >= cycle_limit)
         {
           printf("T2GEN V8.4: slice=%u cycles=%lu frame=%lu line=%lu PC=%06lx VDP=%lu unmapped=%lu\n",

@@ -7,6 +7,10 @@ MAINSRC = src/t2gen_main.c
 ifeq ($(CONFIG_GAMES_T2GEN_MUSASHI),y)
 CSRCS = src/t2gen_musashi.c src/t2gen_vdp.c src/t2gen_render.c src/musashi/m68kcpu.c src/musashi/m68kops.c
 CFLAGS += -I$(APPDIR)/games/t2gen/src/musashi
+CFLAGS += -DCONFIG_GAMES_T2GEN_V040_RENDER_DIVIDER=$(CONFIG_GAMES_T2GEN_V040_RENDER_DIVIDER)
+ifeq ($(CONFIG_GAMES_T2GEN_V040_NO_XBOX),y)
+CFLAGS += -DT2GEN_V040_NO_XBOX=1
+endif
 ifneq ($(filter y,$(CONFIG_GAMES_T2GEN_V010_NATIVE_CMP_EXEC) $(CONFIG_GAMES_T2GEN_V011_NATIVE_SYNC_EXEC)),)
 CFLAGS += -DT2GEN_V010_NATIVE_CMP_EXEC=1
 endif

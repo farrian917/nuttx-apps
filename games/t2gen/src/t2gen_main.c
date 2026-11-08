@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/mount.h>
 #include <sys/ioctl.h>
 #include <nuttx/video/fb.h>
 #include "t2gen_boot.h"
@@ -105,6 +106,43 @@ static int display_probe(const char *path)
 }
 int t2gen_main(int argc, char **argv)
 {
+  /* V0.40.2: launching `t2gen` alone starts the game directly. */
+  char *default_argv[] =
+    {
+      (char *)"t2gen",
+      (char *)"/mnt/t2.gen",
+      (char *)"/dev/fb0",
+      (char *)"play",
+      NULL
+    };
+  if (argc == 1)
+    {
+      /* V0.40.3: prepare SD card before loading the default ROM.
+       * EEXIST/EBUSY allow repeat launches after a previous mount.
+       */
+      if (mkdir("/mnt", 0755) < 0 && errno != EEXIST)
+        {
+          printf("T2GEN: mkdir /mnt failed errno=%d\n", errno);
+          return 1;
+        }
+
+      if (mount("/dev/mmcsd0p0", "/mnt", "vfat", 0, NULL) < 0)
+        {
+          if (errno != EBUSY)
+            {
+              printf("T2GEN: mount /dev/mmcsd0p0 on /mnt failed errno=%d\n", errno);
+              return 1;
+            }
+          printf("T2GEN: /mnt already mounted; continuing\n");
+        }
+      else
+        {
+          printf("T2GEN: SD card mounted at /mnt\n");
+        }
+
+      argc = 4;
+      argv = default_argv;
+    }
   if (argc < 2 || argc > 5)
     {
       printf("Usage: t2gen ROM [ /dev/fb0 | none [ play | view:0-5 | bench_repeats:40-1000 [ bench_repeats:2-1000 ] ] ]\n");

@@ -9,3 +9,7 @@ int t2gen_render_benchmark(const char *device, unsigned repeats);
 /* V9.6: per-stage rendering/DMA2D profiling */
 void t2gen_render_print_perf(void);
 void t2gen_render_print_window(uint64_t wall_us, uint64_t render_us);
+
+#if defined(CONFIG_GAMES_T2GEN_V072_ROW_METADATA) || defined(CONFIG_GAMES_T2GEN_V073_DIRECT_OPAQUE)
+void t2gen_render_v072_report(unsigned long frame);
+#endif
